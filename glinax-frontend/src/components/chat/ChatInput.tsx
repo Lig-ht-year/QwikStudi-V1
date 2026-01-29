@@ -1,0 +1,567 @@
+"use client";
+
+import React, { useState, useRef, useEffect } from "react";
+import { nanoid } from "nanoid";
+import {
+    X,
+    PlusCircle,
+    ArrowUp,
+    Mic,
+    Headphones,
+    HelpCircle,
+    FileText,
+    Upload,
+    Loader2,
+    Camera,
+    Image,
+    Wrench
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { useUIStore } from "@/stores/uiStore";
+import { useDataStore } from "@/stores/dataStore";
+import { useToast } from "@/components/Toast";
+import Cookies from "js-cookie";
+import api from "@/lib/api";
+import { commitChat } from "@/lib/CommitChat";
+
+// Maximum file size: 10MB
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+export function ChatInput() {
+    const [input, setInput] = useState("");
+    const [files, setFiles] = useState<File[]>([]);
+    const [showFeatures, setShowFeatures] = useState(false);
+    const [showAttachMenu, setShowAttachMenu] = useState(false);
+    const [isDragging, setIsDragging] = useState(false);
+    const [isSending, setIsSending] = useState(false);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const imageInputRef = useRef<HTMLInputElement>(null);
+    const cameraInputRef = useRef<HTMLInputElement>(null);
+    const recognitionRef = useRef<any>(null);
+    const { showToast } = useToast();
+    const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
+
+    // Use atomic stores directly for proper reactivity
+    const addMessage = useDataStore((state) => state.addMessage);
+    const aiSettings = useDataStore((state) => state.aiSettings);
+    const chatId = useDataStore((state) => state.chatId);
+    const setChatId = useDataStore((state) => state.setChatId);
+    const createSession = useDataStore((state) => state.createSession);
+    const setActiveModal = useUIStore((state) => state.setActiveModal);
+    const setIsLoading = useUIStore((state) => state.setIsLoading);
+
+    // Speech to Text Implementation
+    const [isRecording, setIsRecording] = useState(false);
+
+    // Initialize guest_id on mount (use UUID format for Django compatibility)
+    useEffect(() => {
+        let guestId = Cookies.get("guest_id");
+        
+        // Validate UUID format (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        
+        if (!guestId || !uuidRegex.test(guestId)) {
+            // Generate proper UUID for Django UUIDField compatibility
+            guestId = crypto.randomUUID();
+            Cookies.set("guest_id", guestId, {
+                expires: 7,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'Strict'
+            });
+        }
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
+            }
+        };
+    }, []);
+
+    const toggleRecording = () => {
+        if (isRecording) {
+            recognitionRef.current?.stop();
+            setIsRecording(false);
+            if (textareaRef.current) {
+                textareaRef.current.focus();
+            }
+            return;
+        }
+
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            alert("Speech recognition is not supported in this browser.");
+            return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            setIsRecording(true);
+        };
+
+        recognition.onresult = (event: any) => {
+            let finalTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const transcript = event.results[i][0].transcript;
+                if (event.results[i].isFinal) {
+                    finalTranscript += transcript + ' ';
+                }
+            }
+            if (finalTranscript) {
+                setInput(prev => prev + finalTranscript);
+            }
+        };
+
+        recognition.onerror = (event: any) => {
+            console.error('Speech recognition error', event.error);
+            setIsRecording(false);
+
+            if (event.error === 'not-allowed') {
+                showToast("Microphone access denied. Please enable microphone permissions in your browser settings.", "error");
+            } else if (event.error === 'no-speech') {
+                // Ignore no-speech errors (silence)
+                return;
+            } else {
+                showToast(`Speech recognition error: ${event.error}`, "error");
+            }
+        };
+
+        recognition.onend = () => {
+            setIsRecording(false);
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+    };
+
+    const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        setInput(e.target.value);
+        autoResize();
+    };
+
+    const autoResize = () => {
+        if (textareaRef.current) {
+            textareaRef.current.style.height = "auto";
+            textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+        }
+    };
+
+    useEffect(() => {
+        autoResize();
+    }, [input]);
+
+    const handleSubmit = async (e?: React.FormEvent) => {
+        e?.preventDefault();
+        if (!input.trim() && files.length === 0) return;
+        if (isSending) return;
+
+        const userMessage = input.trim();
+        const guestId = Cookies.get("guest_id");
+
+        // Add user message immediately
+        addMessage({
+            id: nanoid(),
+            role: 'user',
+            content: userMessage,
+            timestamp: new Date(),
+        });
+
+        setInput("");
+        setFiles([]);
+        if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+        // Call GLINAX API
+        setIsSending(true);
+        setIsLoading(true);
+
+        try {
+            const res = await api.post("/chat/", {
+                prompt: userMessage,
+                guest_id: guestId,
+                chat_id: chatId,  // Pass existing chat_id if available
+                response_style: aiSettings.responseStyle,
+            });
+
+            // Store the chat_id from response for future messages
+            if (res.data.chat_id && !chatId) {
+                setChatId(res.data.chat_id);
+                createSession("New Chat");
+            }
+
+            // Add AI response
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: res.data.response,
+                timestamp: new Date(),
+            });
+
+            // Auto-generate title after 2+ message pairs (4 messages total)
+            const messages = useDataStore.getState().messages;
+            if (chatId && messages.length >= 4) {
+                const recentMessages = messages.slice(-4).map(m => ({
+                    prompt: m.role === 'user' ? m.content : '',
+                    response: m.role === 'assistant' ? m.content : ''
+                })).filter(m => m.prompt || m.response);
+                
+                if (recentMessages.length >= 2) {
+                    commitChat(Number(chatId), recentMessages).catch(console.error);
+                }
+            }
+        } catch (error: any) {
+            console.error("Chat API error:", error);
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: "Sorry, I couldn't process your request. Please try again.",
+                timestamp: new Date(),
+            });
+        } finally {
+            setIsSending(false);
+            setIsLoading(false);
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSubmit();
+        }
+    };
+
+    const removeFile = (index: number) => {
+        setFiles(prev => prev.filter((_, i) => i !== index));
+    };
+
+    // Drag and drop handlers
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(true);
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Only set dragging to false if we're leaving the container entirely
+        if (e.currentTarget === e.target) {
+            setIsDragging(false);
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+
+        const droppedFiles = Array.from(e.dataTransfer.files);
+        if (droppedFiles.length > 0) {
+            // Filter for supported file types and size limit
+            const supportedFiles = droppedFiles.filter(file => {
+                // Check file size (10MB limit)
+                if (file.size > MAX_FILE_SIZE) {
+                    showToast(`File "${file.name}" exceeds 10MB limit`, "error");
+                    return false;
+                }
+                const ext = file.name.toLowerCase().split('.').pop();
+                return ['pdf', 'txt', 'doc', 'docx', 'md'].includes(ext || '');
+            });
+
+            if (supportedFiles.length > 0) {
+                setFiles(prev => [...prev, ...supportedFiles]);
+            }
+        }
+    };
+
+    const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const selectedFiles = e.target.files;
+        if (selectedFiles) {
+            // Filter files by size limit
+            const validFiles = Array.from(selectedFiles).filter(file => {
+                if (file.size > MAX_FILE_SIZE) {
+                    showToast(`File "${file.name}" exceeds 10MB limit`, "error");
+                    return false;
+                }
+                return true;
+            });
+            setFiles(prev => [...prev, ...validFiles]);
+        }
+    };
+
+    return (
+        <div className="w-full pb-4">
+            {/* Hidden file input */}
+            <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileInputChange}
+                accept=".pdf,.txt,.doc,.docx,.md"
+                multiple
+                className="hidden"
+            />
+
+            {/* Main Input Container - Gemini Style with Drag & Drop */}
+            <div
+                className={cn(
+                    "relative bg-card/60 backdrop-blur-xl rounded-3xl shadow-lg transition-all",
+                    isDragging && "ring-2 ring-primary ring-offset-2 ring-offset-background bg-primary/5"
+                )}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+            >
+                {/* Drag Overlay */}
+                {isDragging && (
+                    <div className="absolute inset-0 z-20 flex items-center justify-center bg-primary/10 backdrop-blur-sm rounded-3xl border-2 border-dashed border-primary">
+                        <div className="flex flex-col items-center gap-2 text-primary">
+                            <Upload className="w-8 h-8" />
+                            <span className="font-medium text-sm">Drop files here</span>
+                            <span className="text-xs text-muted-foreground">PDF, TXT, DOC, DOCX, MD</span>
+                        </div>
+                    </div>
+                )}
+
+                {/* Files Preview */}
+                {files.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-4 pt-3 pb-2 border-b border-white/5">
+                        {files.map((file, i) => (
+                            <div key={i} className="flex items-center gap-2 bg-background/50 p-1.5 rounded-lg text-xs font-medium border border-white/5">
+                                <FileText className="w-3 h-3 text-primary" />
+                                <span className="truncate max-w-[120px]">{file.name}</span>
+                                <button onClick={() => removeFile(i)} className="hover:text-destructive">
+                                    <X className="w-3 h-3" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {/* Input Row */}
+                <div className="flex items-center gap-1 p-2">
+                    {/* Hidden file inputs for different types */}
+                    <input
+                        type="file"
+                        ref={imageInputRef}
+                        onChange={handleFileInputChange}
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                    />
+                    <input
+                        type="file"
+                        ref={cameraInputRef}
+                        onChange={handleFileInputChange}
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden"
+                    />
+
+                    {/* Mobile: Plus Button opens attachment menu */}
+                    <div className="relative md:hidden">
+                        <button
+                            onClick={() => setShowAttachMenu(!showAttachMenu)}
+                            aria-label="Attach files"
+                            className={cn(
+                                "p-2.5 rounded-full transition-all duration-200",
+                                showAttachMenu
+                                    ? "bg-primary/10 text-primary"
+                                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                            )}
+                        >
+                            <PlusCircle className="w-5 h-5" />
+                        </button>
+
+                        {/* Mobile Attachment Menu - ChatGPT Style */}
+                        {showAttachMenu && (
+                            <div className="absolute bottom-full left-0 mb-2 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 min-w-[180px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
+                                {/* Camera */}
+                                <button
+                                    onClick={() => { cameraInputRef.current?.click(); setShowAttachMenu(false); }}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
+                                >
+                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-400 to-rose-600 flex items-center justify-center shadow-sm">
+                                        <Camera className="w-4 h-4 text-white" />
+                                    </div>
+                                    <span className="font-medium text-foreground text-sm">Camera</span>
+                                </button>
+
+                                {/* Photos */}
+                                <button
+                                    onClick={() => { imageInputRef.current?.click(); setShowAttachMenu(false); }}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
+                                >
+                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center shadow-sm">
+                                        <Image className="w-4 h-4 text-white" />
+                                    </div>
+                                    <span className="font-medium text-foreground text-sm">Photos</span>
+                                </button>
+
+                                {/* Document */}
+                                <button
+                                    onClick={() => { fileInputRef.current?.click(); setShowAttachMenu(false); }}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
+                                >
+                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-sm">
+                                        <FileText className="w-4 h-4 text-white" />
+                                    </div>
+                                    <span className="font-medium text-foreground text-sm">Document</span>
+                                </button>
+
+                                {/* Divider */}
+                                <div className="my-1 border-t border-white/5" />
+
+                                {/* Tools */}
+                                <button
+                                    onClick={() => { setShowFeatures(!showFeatures); setShowAttachMenu(false); }}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
+                                >
+                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-400 to-purple-600 flex items-center justify-center shadow-sm">
+                                        <Wrench className="w-4 h-4 text-white" />
+                                    </div>
+                                    <span className="font-medium text-foreground text-sm">Tools</span>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Desktop: Plus Button - Opens file picker directly */}
+                    <button
+                        onClick={() => fileInputRef.current?.click()}
+                        aria-label="Attach files"
+                        className="hidden md:block p-2.5 rounded-full transition-all duration-200 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                    >
+                        <PlusCircle className="w-5 h-5" />
+                    </button>
+
+                    {/* Tools Button - Desktop only */}
+                    <button
+                        onClick={() => setShowFeatures(!showFeatures)}
+                        className={cn(
+                            "hidden md:flex items-center gap-1.5 px-3 py-2 rounded-full transition-all",
+                            showFeatures
+                                ? "bg-primary/10 text-primary"
+                                : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                        )}
+                        title="Study Tools"
+                        aria-label="Study Tools"
+                    >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48l2.12 2.12m-2.12-12.72l2.12 2.12M5.64 18.36l2.12-2.12" />
+                        </svg>
+                        <span className="text-sm font-medium">Tools</span>
+                    </button>
+
+                    {/* Text Input */}
+                    <textarea
+                        ref={textareaRef}
+                        rows={1}
+                        value={input}
+                        onChange={handleInput}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Message QwikStudi..."
+                        className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-sm max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
+                    />
+
+                    {/* Right Side Actions */}
+                    <div className="flex items-center gap-1">
+                        {/* Mic Button - Visible on all screens */}
+                        <button
+                            onClick={toggleRecording}
+                            className={cn(
+                                "p-2.5 rounded-full transition-all duration-200",
+                                isRecording
+                                    ? "bg-red-500/10 text-red-500 animate-pulse"
+                                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                            )}
+                            title={isRecording ? "Stop Recording" : "Record Audio"}
+                            aria-label={isRecording ? "Stop recording" : "Record audio"}
+                        >
+                            <Mic className={cn("w-4 h-4", isRecording && "fill-current")} />
+                        </button>
+
+
+
+                        {/* Send Button */}
+                        <button
+                            onClick={handleSubmit}
+                            disabled={!input.trim() && files.length === 0}
+                            aria-label="Send message"
+                            className={cn(
+                                "p-2.5 rounded-full transition-all duration-200",
+                                input.trim() || files.length > 0
+                                    ? "text-primary hover:bg-primary/10"
+                                    : "text-muted-foreground/30 cursor-not-allowed"
+                            )}
+                        >
+                            <ArrowUp className="w-5 h-5" />
+                        </button>
+                    </div>
+                </div>
+
+                {/* Features Popup Menu - Clean Professional Design */}
+                {showFeatures && (
+                    <div className="absolute bottom-full left-2 right-2 md:left-4 md:right-auto mb-3 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 md:p-2 md:min-w-[240px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
+                        {/* Quiz Tool */}
+                        <button
+                            onClick={() => { setActiveModal('quiz'); setShowFeatures(false); }}
+                            className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
+                        >
+                            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center shadow-sm">
+                                <HelpCircle className="w-4 h-4 text-white" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <span className="font-medium text-foreground text-sm">Generate Quiz</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-500/10 text-orange-500 font-medium">AI</span>
+                        </button>
+
+                        {/* Summarize Tool */}
+                        <button
+                            onClick={() => { setActiveModal('summarize'); setShowFeatures(false); }}
+                            className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
+                        >
+                            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center shadow-sm">
+                                <FileText className="w-4 h-4 text-white" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <span className="font-medium text-foreground text-sm">Summarize</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 font-medium">AI</span>
+                        </button>
+
+                        {/* Text-to-Speech Tool */}
+                        <button
+                            onClick={() => { setActiveModal('tts'); setShowFeatures(false); }}
+                            className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
+                        >
+                            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-400 to-violet-600 flex items-center justify-center shadow-sm">
+                                <Headphones className="w-4 h-4 text-white" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <span className="font-medium text-foreground text-sm">Listen</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-500 font-medium">TTS</span>
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            <p className="w-full mt-2 flex justify-center text-[11px] text-muted-foreground/50 font-medium">
+                QwikStudi can make mistakes. Please verify important information.
+            </p>
+        </div>
+    );
+}
+
