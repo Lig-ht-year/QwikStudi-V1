@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Copy, Check, Volume2, ThumbsUp, ThumbsDown, RefreshCw, FileText, Brain } from "lucide-react";
 import { useChatStore } from "@/stores/chatStore";
+import { useDataStore } from "@/stores/dataStore";
 
 import { AudioPlayerCard } from "../cards/AudioPlayerCard";
 import { QuizWidgetCard, type Question } from "../cards/QuizWidgetCard";
@@ -14,7 +15,7 @@ import { FeedbackModal } from "../modals/FeedbackModal";
 interface MessageBubbleProps {
     role: 'user' | 'assistant';
     content: string;
-    timestamp: Date;
+    createdAt: Date;
     type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
     metadata?: Record<string, unknown>;
     onRegenerate?: () => void;
@@ -56,13 +57,14 @@ function formatContentForDisplay(content: unknown): string {
     return String(content);
 }
 
-export function MessageBubble({ role, content, timestamp: _timestamp, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
+export function MessageBubble({ role, content, createdAt: _createdAt, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
     const isAssistant = role === 'assistant';
     const [copied, setCopied] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [rating, setRating] = useState<'like' | 'dislike' | null>(null);
     const [showFeedback, setShowFeedback] = useState(false);
     const { setActiveModal } = useChatStore();
+    const isLimitExceeded = useDataStore((state) => state.isLimitExceeded);
 
     // Ensure content is always a string for rendering
     const displayContent = formatContentForDisplay(content);
@@ -125,13 +127,19 @@ export function MessageBubble({ role, content, timestamp: _timestamp, type, meta
     // Feature chaining - use this message content for summarize/quiz
     const handleSummarizeThis = () => {
         // Store the content for the summarize modal to use
-        // For now, we'll just open the modal - backend integration can handle the content
+        useDataStore.getState().setSelectedContent({
+            type: 'summarize',
+            content: content,
+        });
         setActiveModal('summarize');
     };
 
     const handleGenerateQuiz = () => {
         // Store the content for the quiz modal to use
-        // For now, we'll just open the modal - backend integration can handle the content
+        useDataStore.getState().setSelectedContent({
+            type: 'quiz',
+            content: content,
+        });
         setActiveModal('quiz');
     };
 
@@ -177,7 +185,15 @@ export function MessageBubble({ role, content, timestamp: _timestamp, type, meta
                         {type === 'audio' && (
                             <AudioPlayerCard 
                                 title={String(metadata.title || '')} 
+                                audioUrl={typeof metadata.audio_url === 'string' ? metadata.audio_url : undefined}
                                 duration={String(metadata.duration || '')} 
+                                transcript={
+                                    typeof metadata.transcript === 'string'
+                                        ? metadata.transcript
+                                        : typeof metadata.text === 'string'
+                                            ? metadata.text
+                                            : undefined
+                                }
                             />
                         )}
                         {type === 'quiz' && (
@@ -234,10 +250,16 @@ export function MessageBubble({ role, content, timestamp: _timestamp, type, meta
                         {/* Regenerate Button */}
                         <button
                             onClick={handleRegenerate}
-                            className="p-2 rounded-lg transition-all text-muted-foreground hover:text-foreground hover:bg-white/5"
-                            title="Regenerate response"
+                            disabled={isLimitExceeded}
+                            className={cn(
+                                "p-2 rounded-lg transition-all",
+                                isLimitExceeded
+                                    ? "text-muted-foreground/30 cursor-not-allowed"
+                                    : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                            )}
+                            title={isLimitExceeded ? "Chat limit reached" : "Regenerate response"}
                         >
-                            <RefreshCw className="w-4 h-4" />
+                            <RefreshCw className={cn("w-4 h-4", isLimitExceeded && "opacity-50")} />
                         </button>
 
                         {/* Copy Button */}
@@ -297,4 +319,3 @@ export function MessageBubble({ role, content, timestamp: _timestamp, type, meta
         </div>
     );
 }
-

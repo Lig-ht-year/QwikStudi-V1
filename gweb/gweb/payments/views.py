@@ -12,6 +12,10 @@ import hmac
 import json
 from django.db import transaction
 import logging
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from datetime import timedelta
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -20,42 +24,76 @@ FRONTEND_CALLBACK_URL = getattr(settings, 'FRONTEND_CALLBACK_URL', 'http://local
 
 # ========== PAYMENT VIEWS ==========
 
+def _extend_premium(user, paid_date):
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    today = paid_date
+    if profile.premium_expiry and profile.premium_expiry >= today:
+        profile.premium_expiry = profile.premium_expiry + timedelta(days=30)
+    else:
+        profile.premium_expiry = today + timedelta(days=30)
+    profile.is_premium = True
+    profile.save()
+    return profile
+
+def _initiate_paystack(user, reference):
+    return requests.post(
+        "https://api.paystack.co/transaction/initialize",
+        headers={
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "email": user.email,
+            "amount": "3000",  # 30.00 GHS
+            "currency": "GHS",
+            "reference": reference,
+            "callback_url": settings.FRONTEND_CALLBACK_URL,
+            "metadata": {
+                "user_id": user.id,
+                "custom_fields": [{
+                    "display_name": "Payment For",
+                    "variable_name": "payment_for",
+                    "value": "Premium Upgrade"
+                }]
+            }
+        },
+        timeout=10
+    )
+
 @login_required
 def initiate_payment(request):
-    """Improved payment initiation with better error handling"""
+    """Session-based initiation (used by server-side only)."""
+    return initiate_payment_api(request)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def initiate_payment_api(request):
+    """API-friendly payment initiation using token auth (no CSRF)."""
     try:
-        # Prevent duplicate premium purchases
-        if hasattr(request.user, 'userprofile') and request.user.userprofile.is_premium:
+        profile = UserProfile.objects.filter(user=request.user).first()
+        if profile and profile.is_premium and profile.premium_expiry and profile.premium_expiry >= timezone.now().date():
             return JsonResponse({"error": "You already have a premium account"}, status=400)
 
-        response = requests.post(
-            "https://api.paystack.co/transaction/initialize",
-            headers={
-                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "email": request.user.email,
-                "amount": "3000",  # 30.00 GHS
-                "currency": "GHS",
-                "callback_url": request.build_absolute_uri('/payment/verify/'),
-                "metadata": {
-                    "user_id": request.user.id,
-                    "custom_fields": [{
-                        "display_name": "Payment For",
-                        "variable_name": "payment_for",
-                        "value": "Premium Upgrade"
-                    }]
-                }
-            },
-            timeout=10
+        reference = f"pay_{uuid4().hex}"
+        UserPayment.objects.create(
+            user=request.user,
+            paystack_reference=reference,
+            amount=30.00,
+            currency="GHS",
+            status="pending",
         )
 
+        response = _initiate_paystack(request.user, reference)
+
         if response.status_code == 200:
-            return JsonResponse({"authorization_url": response.json()['data']['authorization_url']})
+            return JsonResponse({
+                "authorization_url": response.json()['data']['authorization_url'],
+                "reference": reference,
+            })
         else:
             error_data = response.json()
             logger.error(f"Paystack error: {error_data.get('message')}")
+            UserPayment.objects.filter(paystack_reference=reference).update(status="failed")
             return JsonResponse({"error": error_data.get('message', 'Payment failed')}, status=400)
     except requests.exceptions.RequestException as e:
         logger.error(f"Payment initiation failed: {str(e)}")
@@ -69,7 +107,8 @@ def verify_payment(request):
     if not reference:
         return redirect(f"{FRONTEND_CALLBACK_URL}?status=error&message=Missing reference")
 
-    if UserPayment.objects.filter(paystack_reference=reference).exists():
+    existing = UserPayment.objects.filter(paystack_reference=reference).first()
+    if existing and existing.status == "success":
         return redirect(f"{FRONTEND_CALLBACK_URL}?reference={reference}&status=already")
     
     try:
@@ -82,18 +121,19 @@ def verify_payment(request):
         if response.status_code == 200:
             data = response.json()
             if data['data']['status'] == 'success':
-                UserPayment.objects.create(
-                    user=request.user,
+                UserPayment.objects.update_or_create(
                     paystack_reference=reference,
-                    amount=data['data']['amount'] / 100,
-                    currency=data['data']['currency'],
-                    payment_method=data['data']['channel'],
-                    status='success',
-                    raw_response=data
+                    defaults={
+                        "user": request.user,
+                        "amount": data['data']['amount'] / 100,
+                        "currency": data['data']['currency'],
+                        "payment_method": data['data']['channel'],
+                        "status": "success",
+                        "completed_at": timezone.now(),
+                        "raw_response": data,
+                    },
                 )
-                profile, created = UserProfile.objects.get_or_create(user=request.user)
-                profile.is_premium = True
-                profile.save()
+                _extend_premium(request.user, timezone.now().date())
                 return redirect(f"{FRONTEND_CALLBACK_URL}?reference={reference}&status=success")
 
     except requests.exceptions.RequestException as e:
@@ -129,26 +169,52 @@ def paystack_webhook(request):
 
             if not UserPayment.objects.filter(paystack_reference=reference).exists():
                 with transaction.atomic():
-                    UserPayment.objects.create(
-                        user=User.objects.get(id=data['metadata']['user_id']),
+                    user = User.objects.get(id=data['metadata']['user_id'])
+                    UserPayment.objects.update_or_create(
                         paystack_reference=reference,
-                        amount=data['amount'] / 100,
-                        currency=data['currency'],
-                        payment_method=data['channel'],
-                        status='success',
-                        raw_response=payload
+                        defaults={
+                            "user": user,
+                            "amount": data['amount'] / 100,
+                            "currency": data['currency'],
+                            "payment_method": data['channel'],
+                            "status": "success",
+                            "completed_at": timezone.now(),
+                            "raw_response": payload,
+                        },
                     )
-                    profile, _ = UserProfile.objects.get_or_create(
-                        user_id=data['metadata']['user_id']
-                    )
-                    profile.is_premium = True
-                    profile.save()
-        
-        return JsonResponse({"status": "success"})
-    
+                    _extend_premium(user, timezone.now().date())
     except Exception as e:
-        logger.error(f"Webhook processing failed: {str(e)}")
-        return JsonResponse({"status": "error", "message": str(e)}, status=400)
+        logger.error(f"Webhook processing failed: {e}")
+        return JsonResponse({"status": "failed"}, status=400)
+
+    return JsonResponse({"status": "success"})
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def payment_status(request):
+    reference = request.query_params.get("reference")
+    today = timezone.now().date()
+
+    profile = UserProfile.objects.filter(user=request.user).first()
+    if profile and profile.premium_expiry and profile.premium_expiry < today:
+        profile.is_premium = False
+        profile.save()
+
+    if reference:
+        payment = UserPayment.objects.filter(user=request.user, paystack_reference=reference).first()
+        if not payment:
+            return JsonResponse({"error": "Payment reference not found"}, status=404)
+        return JsonResponse({
+            "status": payment.status,
+            "is_premium": bool(profile and profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today),
+            "premium_expiry": profile.premium_expiry.isoformat() if profile and profile.premium_expiry else None,
+        })
+
+    return JsonResponse({
+        "status": "ok",
+        "is_premium": bool(profile and profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today),
+        "premium_expiry": profile.premium_expiry.isoformat() if profile and profile.premium_expiry else None,
+    })
 
 # ========== USAGE TRACKING ==========
 
@@ -220,4 +286,3 @@ def reset_usage():
 
 # Added the following line as suggested for integrating react-paystack (npm dependency)
 # npm install react-paystack
-

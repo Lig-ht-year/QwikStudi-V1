@@ -14,22 +14,103 @@ import { cn } from "@/lib/utils";
 
 interface AudioPlayerCardProps {
     title: string;
+    audioUrl?: string;
     duration?: string;
+    transcript?: string;
 }
 
-export function AudioPlayerCard({ title, duration = "2:45" }: AudioPlayerCardProps) {
+export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript }: AudioPlayerCardProps) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [speed, setSpeed] = useState(1);
-    const [progress, setProgress] = useState(35);
+    const [progress, setProgress] = useState(0);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [showTranscript, setShowTranscript] = useState(false);
+    const audioRef = React.useRef<HTMLAudioElement | null>(null);
+    const progressRef = React.useRef<HTMLDivElement | null>(null);
 
     const toggleSpeed = () => {
-        if (speed === 1) setSpeed(1.5);
-        else if (speed === 1.5) setSpeed(2);
-        else setSpeed(1);
+        const next = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
+        setSpeed(next);
+        if (audioRef.current) {
+            audioRef.current.playbackRate = next;
+        }
+    };
+
+    const togglePlay = async () => {
+        if (!audioRef.current) return;
+        try {
+            if (audioRef.current.paused) {
+                await audioRef.current.play();
+                setIsPlaying(true);
+            } else {
+                audioRef.current.pause();
+                setIsPlaying(false);
+            }
+        } catch {
+            setIsPlaying(false);
+        }
+    };
+
+    const handleTimeUpdate = () => {
+        if (!audioRef.current || !audioRef.current.duration) return;
+        const pct = (audioRef.current.currentTime / audioRef.current.duration) * 100;
+        setProgress(Number.isFinite(pct) ? pct : 0);
+        setCurrentTime(audioRef.current.currentTime);
+    };
+
+    const handleEnded = () => {
+        setIsPlaying(false);
+        setProgress(100);
+    };
+
+    const handleSeek = (clientX: number) => {
+        if (!audioRef.current || !progressRef.current || !audioRef.current.duration) return;
+        const rect = progressRef.current.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+        audioRef.current.currentTime = ratio * audioRef.current.duration;
+    };
+
+    const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        handleSeek(e.clientX);
+    };
+
+    const handleProgressKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!audioRef.current || !audioRef.current.duration) return;
+        if (e.key === "ArrowRight") {
+            audioRef.current.currentTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 5);
+        } else if (e.key === "ArrowLeft") {
+            audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 5);
+        }
+    };
+
+    const handleRewind = () => {
+        if (!audioRef.current) return;
+        audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 10);
+    };
+
+    const handleForward = () => {
+        if (!audioRef.current || !audioRef.current.duration) return;
+        audioRef.current.currentTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 10);
+    };
+
+    const formatTime = (seconds: number) => {
+        const s = Math.max(0, Math.floor(seconds));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}:${r.toString().padStart(2, "0")}`;
     };
 
     return (
         <div className="w-full max-w-sm bg-card border border-border/50 rounded-2xl shadow-xl overflow-hidden animate-in fade-in zoom-in duration-300">
+            {audioUrl && (
+                <audio
+                    ref={audioRef}
+                    src={audioUrl}
+                    preload="metadata"
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={handleEnded}
+                />
+            )}
             <div className="p-4 flex flex-col gap-4">
                 {/* Header */}
                 <div className="flex items-center gap-3">
@@ -44,7 +125,21 @@ export function AudioPlayerCard({ title, duration = "2:45" }: AudioPlayerCardPro
 
                 {/* Progress Bar */}
                 <div className="space-y-1">
-                    <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden cursor-pointer group">
+                    <div
+                        ref={progressRef}
+                        role="slider"
+                        tabIndex={0}
+                        aria-label="Seek audio"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={Math.round(progress)}
+                        onClick={handleProgressClick}
+                        onKeyDown={handleProgressKey}
+                        className={cn(
+                            "h-1.5 w-full bg-muted rounded-full overflow-hidden cursor-pointer group",
+                            !audioUrl && "opacity-50 cursor-not-allowed"
+                        )}
+                    >
                         <div
                             className="h-full bg-primary rounded-full transition-all duration-300 relative"
                             style={{ width: `${progress}%` }}
@@ -53,7 +148,7 @@ export function AudioPlayerCard({ title, duration = "2:45" }: AudioPlayerCardPro
                         </div>
                     </div>
                     <div className="flex justify-between text-[10px] text-muted-foreground font-medium">
-                        <span>1:02</span>
+                        <span>{formatTime(currentTime)}</span>
                         <span>{duration}</span>
                     </div>
                 </div>
@@ -61,16 +156,25 @@ export function AudioPlayerCard({ title, duration = "2:45" }: AudioPlayerCardPro
                 {/* Controls */}
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1">
-                        <button className="p-2 text-muted-foreground hover:text-foreground transition-colors">
+                        <button
+                            onClick={handleRewind}
+                            disabled={!audioUrl}
+                            className="p-2 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                        >
                             <RotateCcw className="w-4 h-4" />
                         </button>
                         <button
-                            onClick={() => setIsPlaying(!isPlaying)}
-                            className="w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
+                            onClick={togglePlay}
+                            disabled={!audioUrl}
+                            className="w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 disabled:opacity-50"
                         >
                             {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 ml-0.5 fill-current" />}
                         </button>
-                        <button className="p-2 text-muted-foreground hover:text-foreground transition-colors">
+                        <button
+                            onClick={handleForward}
+                            disabled={!audioUrl}
+                            className="p-2 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                        >
                             <FastForward className="w-4 h-4" />
                         </button>
                     </div>
@@ -90,10 +194,23 @@ export function AudioPlayerCard({ title, duration = "2:45" }: AudioPlayerCardPro
             </div>
 
             {/* Action Footer */}
-            <button className="w-full py-2.5 bg-secondary/50 hover:bg-secondary text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-all flex items-center justify-center gap-1 border-t border-border/50">
-                Review Transcripts
-                <ChevronRight className="w-3 h-3" />
+            <button
+                onClick={() => transcript && setShowTranscript((v) => !v)}
+                disabled={!transcript}
+                className={cn(
+                    "w-full py-2.5 bg-secondary/50 hover:bg-secondary text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-all flex items-center justify-center gap-1 border-t border-border/50",
+                    !transcript && "opacity-50 cursor-not-allowed"
+                )}
+            >
+                Review Transcript
+                <ChevronRight className={cn("w-3 h-3 transition-transform", showTranscript && "rotate-90")} />
             </button>
+
+            {showTranscript && transcript && (
+                <div className="px-4 py-3 text-xs text-muted-foreground border-t border-border/50 bg-secondary/20">
+                    <p className="whitespace-pre-wrap">{transcript}</p>
+                </div>
+            )}
         </div>
     );
 }

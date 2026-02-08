@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
     X,
     Upload,
@@ -16,11 +16,13 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
+import { useDataStore } from "@/stores/dataStore";
 
 interface QuizConfigModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (config: QuizConfig) => void;
+    onGenerate: (config: QuizConfig, content?: string) => void;
+    initialContent?: string;
 }
 
 interface QuizConfig {
@@ -43,7 +45,7 @@ const difficulties = [
     { id: "hard", name: "Hard", color: "text-red-500 bg-red-500/10 border-red-500/30" },
 ];
 
-export function QuizConfigModal({ isOpen, onClose, onGenerate }: QuizConfigModalProps) {
+export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }: QuizConfigModalProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [questionType, setQuestionType] = useState("mcq");
     const [questionCount, setQuestionCount] = useState(10);
@@ -51,6 +53,17 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate }: QuizConfigModal
     const [isGenerating, setIsGenerating] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
     const { showToast } = useToast();
+    const clearSelectedContent = useDataStore((state) => state.clearSelectedContent);
+
+    // Get content from store when modal opens (if no initialContent prop)
+    const content = initialContent || useDataStore.getState().selectedContent.content;
+
+    // Clear selected content when modal closes
+    useEffect(() => {
+        if (!isOpen) {
+            clearSelectedContent();
+        }
+    }, [isOpen, clearSelectedContent]);
 
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -92,15 +105,19 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate }: QuizConfigModal
     };
 
     const handleGenerate = () => {
-        if (!uploadedFile) return;
+        // Allow generation with either uploaded file or stored content
+        if (!uploadedFile && !content) return;
         setIsGenerating(true);
         // Backend will handle quiz generation
         setTimeout(() => {
-            onGenerate({ file: uploadedFile, questionType, questionCount, difficulty });
+            onGenerate({ file: uploadedFile, questionType, questionCount, difficulty }, content);
             setIsGenerating(false);
             onClose();
         }, 2000);
     };
+
+    // Check if we have content to generate quiz from (either from file or from message)
+    const hasContent = uploadedFile || content;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -291,14 +308,14 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate }: QuizConfigModal
                 {/* Footer */}
                 <div className="p-5 border-t border-border/50 flex items-center justify-between bg-background sticky bottom-0 z-20">
                     <div className="text-[10px] text-muted-foreground font-medium">
-                        {uploadedFile ? "Ready to generate" : "Upload file to start"}
+                        {hasContent ? "Ready to generate" : "Upload file or use message content"}
                     </div>
                     <button
                         onClick={handleGenerate}
-                        disabled={!uploadedFile || isGenerating}
+                        disabled={!hasContent || isGenerating}
                         className={cn(
                             "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
-                            !uploadedFile || isGenerating
+                            !hasContent || isGenerating
                                 ? "opacity-50 cursor-not-allowed"
                                 : "hover:bg-primary/90 hover:scale-105"
                         )}

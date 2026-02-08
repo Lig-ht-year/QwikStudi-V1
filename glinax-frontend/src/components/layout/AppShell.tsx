@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import { Sidebar } from "./Sidebar";
 import { AlignLeft, X, Plus, User } from "lucide-react";
 import Link from "next/link";
@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
+import { checkPremiumStatus } from "@/lib/payment";
 
 interface AppShellProps {
     children: React.ReactNode;
@@ -19,7 +20,21 @@ export function AppShell({ children }: AppShellProps) {
     const setIsSidebarOpen = useUIStore((state) => state.setIsSidebarOpen);
     const createSession = useDataStore((state) => state.createSession);
     const profilePicture = useDataStore((state) => state.profilePicture);
+    const isLoggedIn = useDataStore((state) => state.isLoggedIn);
+    const setPlan = useDataStore((state) => state.setPlan);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
+
+    useEffect(() => {
+        if (!isLoggedIn) return;
+        (async () => {
+            try {
+                const isPremium = await checkPremiumStatus();
+                setPlan(isPremium ? "pro" : "free");
+            } catch {
+                // ignore
+            }
+        })();
+    }, [isLoggedIn, setPlan]);
 
     return (
         <KeyboardShortcuts>
@@ -111,4 +126,3 @@ export function AppShell({ children }: AppShellProps) {
         </KeyboardShortcuts>
     );
 }
-

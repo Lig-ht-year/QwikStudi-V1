@@ -9,6 +9,8 @@ import { translations } from "@/lib/translations";
 import { Brain, FileText, Headphones, Sparkles } from "lucide-react";
 import { getChatMessages } from "@/lib/getChatMessages";
 import { nanoid } from "nanoid";
+import Cookies from "js-cookie";
+import api from "@/lib/api";
 
 
 // Calculate Easter date using Computus algorithm (Anonymous Gregorian algorithm)
@@ -136,10 +138,67 @@ export function ChatContainer() {
     const sessions = useDataStore((state) => state.sessions);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
     const chatId = useDataStore((state) => state.chatId);
+    const setSessionMessages = useDataStore((state) => state.setSessionMessages);
     const t = translations[language];
     const isLoading = useUIStore((state) => state.isLoading);
+    const setIsLoading = useUIStore((state) => state.setIsLoading);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const aiSettings = useDataStore((state) => state.aiSettings);
+    const previousSessionIdRef = useRef<string | null>(null);
+    const fetchedChatIdsRef = useRef<Set<number>>(new Set());
+    const inFlightChatIdRef = useRef<number | null>(null);
+
+    const handleRegenerate = async (messageId: string) => {
+        const state = useDataStore.getState();
+        const currentMessages = state.messages;
+        const targetIndex = currentMessages.findIndex((m) => m.id === messageId);
+        if (targetIndex === -1) return;
+
+        let prompt: string | null = null;
+        for (let i = targetIndex - 1; i >= 0; i -= 1) {
+            if (currentMessages[i].role === "user") {
+                prompt = currentMessages[i].content;
+                break;
+            }
+        }
+
+        if (!prompt) return;
+
+        setIsLoading(true);
+        useDataStore.setState((prev) => ({
+            messages: prev.messages.map((m) =>
+                m.id === messageId ? { ...m, content: "Regenerating...", createdAt: new Date() } : m
+            ),
+        }));
+
+        try {
+            const guestId = Cookies.get("guest_id");
+            const res = await api.post("/chat/", {
+                prompt,
+                guest_id: guestId,
+                chat_id: state.chatId,
+                response_style: aiSettings.responseStyle,
+            });
+
+            useDataStore.setState((prev) => ({
+                messages: prev.messages.map((m) =>
+                    m.id === messageId ? { ...m, content: res.data.response, createdAt: new Date() } : m
+                ),
+            }));
+        } catch (error) {
+            console.error("Regenerate failed:", error);
+            useDataStore.setState((prev) => ({
+                messages: prev.messages.map((m) =>
+                    m.id === messageId
+                        ? { ...m, content: "Sorry, I couldn't regenerate that response. Please try again." }
+                        : m
+                ),
+            }));
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
     // Dynamic greeting state
     const [greeting, setGreeting] = useState("");
@@ -161,38 +220,87 @@ export function ChatContainer() {
 
     // Load messages when a session is selected
     useEffect(() => {
-        const loadSessionMessages = async () => {
-            if (activeSessionId && chatId) {
-                // Find the session to get its chat_id
-                const session = sessions.find((s: { id: string }) => s.id === activeSessionId);
-                if (session) {
-                    const { error, data } = await getChatMessages(Number(chatId));
-                    if (!error && data.length > 0) {
-                        // Convert backend messages to frontend format
-                        const loadedMessages = data.map(msg => [
-                            {
-                                id: nanoid(),
-                                role: 'user' as const,
-                                content: msg.prompt,
-                                timestamp: new Date(msg.created_at),
-                            },
-                            {
-                                id: nanoid(),
-                                role: 'assistant' as const,
-                                content: msg.response,
-                                timestamp: new Date(msg.created_at),
-                            }
-                        ]).flat();
+        const prevSessionId = previousSessionIdRef.current;
+        if (prevSessionId && prevSessionId !== activeSessionId) {
+            setSessionMessages(prevSessionId, messages);
+        }
+        previousSessionIdRef.current = activeSessionId;
+    }, [activeSessionId, messages, setSessionMessages]);
 
-                        // Clear and replace messages
-                        useDataStore.getState().clearMessages();
-                        loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
-                    }
-                }
-            } else if (!activeSessionId) {
+    useEffect(() => {
+        const loadSessionMessages = async () => {
+            if (!activeSessionId) {
                 // Clear messages when no session is selected
                 useDataStore.getState().clearMessages();
+                return;
             }
+
+            const session = sessions.find((s: { id: string }) => s.id === activeSessionId);
+            if (!session) {
+                useDataStore.getState().clearMessages();
+                return;
+            }
+
+            const sessionChatId = session.chatId ?? null;
+            if (sessionChatId !== chatId) {
+                useDataStore.getState().setChatId(sessionChatId);
+            }
+
+            const allSessionMessages = useDataStore.getState().sessionMessages;
+            const hasCached = Object.prototype.hasOwnProperty.call(allSessionMessages, activeSessionId);
+            if (hasCached) {
+                const cachedMessages = allSessionMessages[activeSessionId];
+                useDataStore.setState({ messages: cachedMessages });
+            } else {
+                useDataStore.getState().clearMessages();
+            }
+
+            if (!sessionChatId) return;
+
+            if (inFlightChatIdRef.current === sessionChatId) return;
+            if (hasCached && fetchedChatIdsRef.current.has(sessionChatId)) return;
+
+            inFlightChatIdRef.current = sessionChatId;
+            const { error, data } = await getChatMessages(Number(sessionChatId));
+            inFlightChatIdRef.current = null;
+            if (error) return;
+
+            // Convert backend messages to frontend format
+            const loadedMessages = data.flatMap(msg => {
+                const items: {
+                    id: string;
+                    role: 'user' | 'assistant';
+                    content: string;
+                    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+                    metadata?: Record<string, unknown>;
+                    createdAt: Date;
+                }[] = [];
+
+                if (msg.prompt && msg.prompt.trim().length > 0) {
+                    items.push({
+                        id: nanoid(),
+                        role: 'user',
+                        content: msg.prompt,
+                        type: (msg.prompt_type as any) || 'text',
+                        metadata: msg.prompt_metadata || undefined,
+                        createdAt: new Date(msg.created_at),
+                    });
+                }
+
+                items.push({
+                    id: nanoid(),
+                    role: 'assistant',
+                    content: msg.response,
+                    type: (msg.response_type as any) || 'text',
+                    metadata: msg.response_metadata || undefined,
+                    createdAt: new Date(msg.created_at),
+                });
+
+                return items;
+            });
+
+            useDataStore.setState({ messages: loadedMessages });
+            fetchedChatIdsRef.current.add(sessionChatId);
         };
 
         loadSessionMessages();
@@ -273,9 +381,10 @@ export function ChatContainer() {
                                 key={message.id}
                                 role={message.role}
                                 content={message.content}
-                                timestamp={message.timestamp}
+                                createdAt={message.createdAt}
                                 type={message.type}
                                 metadata={message.metadata}
+                                onRegenerate={message.role === "assistant" ? () => handleRegenerate(message.id) : undefined}
                             />
                         ))
                     )}
@@ -302,4 +411,3 @@ export function ChatContainer() {
         </div>
     );
 }
-

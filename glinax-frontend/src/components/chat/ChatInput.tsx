@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { nanoid } from "nanoid";
+import Link from "next/link";
 import {
     X,
     PlusCircle,
@@ -19,6 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
+import { translations } from "@/lib/translations";
 import { useToast } from "@/components/Toast";
 import Cookies from "js-cookie";
 import api from "@/lib/api";
@@ -48,8 +50,17 @@ export function ChatInput() {
     const chatId = useDataStore((state) => state.chatId);
     const setChatId = useDataStore((state) => state.setChatId);
     const createSession = useDataStore((state) => state.createSession);
+    const updateSession = useDataStore((state) => state.updateSession);
+    const updateSessionByChatId = useDataStore((state) => state.updateSessionByChatId);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
     const setIsLoading = useUIStore((state) => state.setIsLoading);
+    const language = useDataStore((state) => state.language);
+    const t = translations[language];
+    const isLimitExceeded = useDataStore((state) => state.isLimitExceeded);
+    const setIsLimitExceeded = useDataStore((state) => state.setIsLimitExceeded);
+
+    // Limit message state (kept local since it's transient)
+    const [limitMessage, setLimitMessage] = useState("");
 
     // Speech to Text Implementation
     const [isRecording, setIsRecording] = useState(false);
@@ -163,14 +174,34 @@ export function ChatInput() {
 
         const userMessage = input.trim();
         const guestId = Cookies.get("guest_id");
+        const now = new Date();
 
         // Add user message immediately
         addMessage({
             id: nanoid(),
             role: 'user',
             content: userMessage,
-            timestamp: new Date(),
+            createdAt: now,
         });
+
+        const state = useDataStore.getState();
+        const currentSessionId = state.activeSessionId;
+        const currentSession = currentSessionId
+            ? state.sessions.find((session) => session.id === currentSessionId)
+            : null;
+        const defaultTitle = currentSession?.title === "New Study Session" || currentSession?.title === "New Chat";
+        const trimmedTitle = userMessage.length > 60 ? `${userMessage.slice(0, 60)}...` : userMessage;
+
+        if (currentSessionId && (defaultTitle || !currentSession?.title)) {
+            updateSession(currentSessionId, {
+                title: trimmedTitle,
+                lastMessageAt: now,
+            });
+        } else if (currentSessionId) {
+            updateSession(currentSessionId, { lastMessageAt: now });
+        } else {
+            createSession(trimmedTitle, { chatId: null, resetMessages: false });
+        }
 
         setInput("");
         setFiles([]);
@@ -188,10 +219,36 @@ export function ChatInput() {
                 response_style: aiSettings.responseStyle,
             });
 
+            if (res.data?.guest_id && res.data.guest_id !== guestId) {
+                Cookies.set("guest_id", res.data.guest_id, {
+                    expires: 7,
+                    secure: process.env.NODE_ENV === 'production',
+                    sameSite: 'Strict'
+                });
+            }
+
+            // Check for limit exceeded response
+            if (res.data.limit_exceeded) {
+                setIsLimitExceeded(true);
+                setLimitMessage(res.data.message);
+                setIsSending(false);
+                setIsLoading(false);
+                return;
+            }
+
             // Store the chat_id from response for future messages
             if (res.data.chat_id && !chatId) {
                 setChatId(res.data.chat_id);
-                createSession("New Chat");
+                const latestState = useDataStore.getState();
+                const latestSessionId = latestState.activeSessionId;
+                if (latestSessionId) {
+                    updateSession(latestSessionId, {
+                        chatId: res.data.chat_id,
+                        lastMessageAt: new Date(),
+                    });
+                } else {
+                    createSession(trimmedTitle || "New Chat", { chatId: res.data.chat_id, resetMessages: false });
+                }
             }
 
             // Add AI response
@@ -199,7 +256,7 @@ export function ChatInput() {
                 id: nanoid(),
                 role: 'assistant',
                 content: res.data.response,
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
 
             // Auto-generate title after 2+ message pairs (4 messages total)
@@ -211,7 +268,16 @@ export function ChatInput() {
                 })).filter(m => m.prompt || m.response);
                 
                 if (recentMessages.length >= 2) {
-                    commitChat(Number(chatId), recentMessages).catch(console.error);
+                    commitChat(Number(chatId), recentMessages)
+                        .then((result) => {
+                            if (result?.title) {
+                                updateSessionByChatId(Number(chatId), {
+                                    title: result.title,
+                                    lastMessageAt: new Date(),
+                                });
+                            }
+                        })
+                        .catch(console.error);
                 }
             }
         } catch (error: any) {
@@ -220,7 +286,7 @@ export function ChatInput() {
                 id: nanoid(),
                 role: 'assistant',
                 content: "Sorry, I couldn't process your request. Please try again.",
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
         } finally {
             setIsSending(false);
@@ -301,6 +367,42 @@ export function ChatInput() {
 
     return (
         <div className="w-full pb-4">
+            {/* Limit Exceeded Banner */}
+            {isLimitExceeded && (
+                <div className="mb-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center flex-shrink-0">
+                            <svg className="w-4 h-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                            </svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h4 className="font-semibold text-amber-500 text-sm mb-1">
+                                {t.limitExceeded}
+                            </h4>
+                            <p className="text-sm text-foreground/80 mb-3">
+                                {limitMessage || t.limitExceededMessage}
+                            </p>
+                            <Link
+                                href="/login"
+                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-500 text-sm font-medium transition-colors"
+                            >
+                                {t.loginToContinue}
+                            </Link>
+                        </div>
+                        <button
+                            onClick={() => {
+                                setIsLimitExceeded(false);
+                                setLimitMessage("");
+                            }}
+                            className="p-1 rounded-lg hover:bg-amber-500/10 text-amber-500/70 hover:text-amber-500 transition-colors"
+                        >
+                            <X className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Hidden file input */}
             <input
                 type="file"
@@ -554,6 +656,20 @@ export function ChatInput() {
                             </div>
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-500 font-medium">TTS</span>
                         </button>
+
+                        {/* Speech-to-Text Tool */}
+                        <button
+                            onClick={() => { setActiveModal('stt'); setShowFeatures(false); }}
+                            className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
+                        >
+                            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-400 to-sky-600 flex items-center justify-center shadow-sm">
+                                <Mic className="w-4 h-4 text-white" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <span className="font-medium text-foreground text-sm">Transcribe Audio</span>
+                            </div>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-500 font-medium">STT</span>
+                        </button>
                     </div>
                 )}
             </div>
@@ -564,4 +680,3 @@ export function ChatInput() {
         </div>
     );
 }
-

@@ -12,9 +12,9 @@ export function logout() {
         Authorization: `Bearer ${access}`,
       },
     }).finally(() => {
-      window.location.href = "/auth/login";
+      window.location.href = "/login";
     });
   } else {
-    window.location.href = "/auth/login";
+    window.location.href = "/login";
   }
 }

@@ -47,7 +47,7 @@ api.interceptors.response.use(
         // Refresh failed → force logout
         localStorage.removeItem("access");
         localStorage.removeItem("refresh");
-        window.location.href = "/auth/login";
+        window.location.href = "/login";
       }
     }
 

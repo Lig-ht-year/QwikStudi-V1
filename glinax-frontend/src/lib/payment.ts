@@ -47,7 +47,7 @@ export async function verifyPayment(reference: string): Promise<{ success: boole
         throw new Error('You must be logged in to verify payment');
     }
 
-    const response = await fetch(`${API_URL}/payment/verify/?reference=${reference}`, {
+    const response = await fetch(`${API_URL.replace(/\/api\/?$/, '')}/payment/verify/?reference=${reference}`, {
         method: 'GET',
         headers: {
             'Content-Type': 'application/json',
@@ -87,6 +87,26 @@ export async function verifyPayment(reference: string): Promise<{ success: boole
     }
 }
 
+export async function getPaymentStatus(reference?: string): Promise<{ status: string; is_premium: boolean; premium_expiry: string | null }> {
+    const access = localStorage.getItem('access');
+    if (!access) {
+        throw new Error('You must be logged in to check payment status');
+    }
+    const url = reference ? `${API_URL}/payment/status/?reference=${reference}` : `${API_URL}/payment/status/`;
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${access}`,
+        },
+    });
+    if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to check payment status');
+    }
+    return await response.json();
+}
+
 /**
  * Check if the current user has premium status
  * @returns Whether the user has premium status
@@ -99,7 +119,7 @@ export async function checkPremiumStatus(): Promise<boolean> {
     }
 
     try {
-        const response = await fetch(`${API_URL}/auth/user/`, {
+        const response = await fetch(`${API_URL}/payment/status/`, {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
@@ -111,11 +131,9 @@ export async function checkPremiumStatus(): Promise<boolean> {
             return false;
         }
 
-        const userData = await response.json();
-        // Check if user has userprofile with is_premium
-        return userData.userprofile?.is_premium || false;
+        const data = await response.json();
+        return !!data.is_premium;
     } catch {
         return false;
     }
 }
-

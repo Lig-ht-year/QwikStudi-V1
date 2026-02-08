@@ -35,6 +35,8 @@ urlpatterns = [
     path('api/auth/', include('g_auth.urls')),
     path('api/chat/', include('chat.urls')),
     path('api/', include('files.urls')),
+    path('api/payment/initiate/', views.initiate_payment_api, name='initiate_payment_api'),
+    path('api/payment/status/', views.payment_status, name='payment_status'),
     path('pay/', views.initiate_payment, name='initiate_payment'),
     path('payment/verify/', views.verify_payment, name='verify_payment'),
     path('payment/webhook/', views.paystack_webhook, name='paystack_webhook'),
@@ -42,4 +44,3 @@ urlpatterns = [
 ]
 
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-

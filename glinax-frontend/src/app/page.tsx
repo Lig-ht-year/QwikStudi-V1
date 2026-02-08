@@ -1,5 +1,6 @@
 "use client";
 
+import React, { useEffect } from "react";
 import { nanoid } from "nanoid";
 import { AppShell } from "@/components/layout/AppShell";
 import { ChatContainer } from "@/components/chat/ChatContainer";
@@ -11,6 +12,8 @@ import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import api from "@/lib/api";
 import { useToast } from "@/components/Toast";
+import { getChatHistory } from "@/lib/getChatHistory";
+import { startNewChat } from "@/lib/startNewChat";
 
 interface QuizConfig {
     file: File | null;
@@ -31,40 +34,194 @@ export default function Home() {
     const setActiveModal = useUIStore((state) => state.setActiveModal);
     const addMessage = useDataStore((state) => state.addMessage);
     const removeMessage = useDataStore((state) => state.removeMessage);
+    const isLoggedIn = useDataStore((state) => state.isLoggedIn);
+    const sessions = useDataStore((state) => state.sessions);
+    const activeSessionId = useDataStore((state) => state.activeSessionId);
+    const setActiveSessionId = useDataStore((state) => state.setActiveSessionId);
+    const setChatId = useDataStore((state) => state.setChatId);
+    const chatId = useDataStore((state) => state.chatId);
+    const createSession = useDataStore((state) => state.createSession);
+    const updateSession = useDataStore((state) => state.updateSession);
+    const loadChatHistory = useDataStore((state) => state.loadChatHistory);
     const { showToast } = useToast();
 
-    const handleTTSGenerate = (text: string, voice: string) => {
-        addMessage({
-            id: nanoid(),
-            role: 'assistant',
-            content: `I've generated audio for your text using the ${voice} voice. Click play to listen.`,
-            type: 'audio',
-            metadata: { title: "Generated Audio", duration: "02:30" },
-            timestamp: new Date(),
-        });
+    const ensureChatId = async () => {
+        if (!isLoggedIn) return null;
+        if (chatId) return chatId;
+        try {
+            const data = await startNewChat();
+            const newChatId = data?.chat_id ?? null;
+            if (!newChatId) return null;
+            if (activeSessionId) {
+                updateSession(activeSessionId, { chatId: newChatId });
+            } else {
+                createSession(data?.title || "New Chat", { chatId: newChatId, resetMessages: false, setActive: true });
+            }
+            setChatId(newChatId);
+            return newChatId;
+        } catch {
+            return null;
+        }
     };
 
-    const handleSTTProcess = () => {
+    useEffect(() => {
+        let isMounted = true;
+        const shouldFetch = isLoggedIn && sessions.length === 0 && typeof window !== "undefined" && !!localStorage.getItem("access");
+        if (!shouldFetch) return;
+
+        (async () => {
+            const { data, error } = await getChatHistory();
+            if (!isMounted || error || data.length === 0) return;
+            loadChatHistory(data);
+        })();
+
+        return () => {
+            isMounted = false;
+        };
+    }, [isLoggedIn, sessions.length, loadChatHistory]);
+
+    useEffect(() => {
+        if (activeSessionId || sessions.length === 0) return;
+        const firstSession = sessions[0];
+        setActiveSessionId(firstSession.id);
+        setChatId(firstSession.chatId ?? null);
+    }, [activeSessionId, sessions, setActiveSessionId, setChatId]);
+
+    const handleTTSGenerate = async (text: string, voice: string) => {
+        const loadingId = nanoid();
         addMessage({
-            id: nanoid(),
+            id: loadingId,
             role: 'assistant',
-            content: "I've transcribed your recording. Here are your lecture notes:",
-            type: 'notes',
-            metadata: {
-                title: "Lecture Notes",
-                notes: [
-                    "Key concept: Introduction to the topic",
-                    "Important point discussed",
-                    "Summary of main ideas"
-                ],
-                duration: "15:30"
-            },
-            timestamp: new Date(),
+            content: "Generating your audio...",
+            type: 'text',
+            createdAt: new Date(),
         });
+
+        try {
+            const resolvedChatId = await ensureChatId();
+            const res = await api.post("/chat/audio/generate/", {
+                text,
+                voice,
+                chat_id: resolvedChatId,
+            });
+
+            removeMessage(loadingId);
+
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: `I've generated audio for your text using the ${voice} voice. Click play to listen.`,
+                type: 'audio',
+                metadata: {
+                    title: "Generated Audio",
+                    audio_url: res.data?.audio_url,
+                    voice,
+                    transcript: text,
+                },
+                createdAt: new Date(),
+            });
+            showToast("Audio generated successfully!", "success");
+        } catch (error: any) {
+            console.error("TTS generation failed:", error);
+            removeMessage(loadingId);
+            const message = error.response?.data?.error || "Failed to generate audio. Please try again.";
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: message,
+                type: 'text',
+                createdAt: new Date(),
+            });
+            showToast(message, "error");
+        }
     };
 
-    const handleQuizGenerate = async (config: QuizConfig) => {
-        if (!config.file) return;
+    const formatDuration = (durationMs?: number) => {
+        if (!durationMs) return undefined;
+        const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+    };
+
+    const buildNotesFromTranscription = (text: string) => {
+        const sentences = text
+            .split(/(?:\r?\n)+|[.!?]\s+/)
+            .map((sentence) => sentence.trim())
+            .filter(Boolean);
+
+        if (sentences.length === 0) return [];
+        if (sentences.length <= 8) return sentences;
+        return sentences.slice(0, 8);
+    };
+
+    const handleSTTProcess = async (audioFile: File, durationMs?: number) => {
+        const loadingId = nanoid();
+
+        addMessage({
+            id: loadingId,
+            role: 'assistant',
+            content: "Transcribing your recording...",
+            type: 'text',
+            createdAt: new Date(),
+        });
+
+        try {
+            const formData = new FormData();
+            formData.append("file", audioFile);
+            const resolvedChatId = await ensureChatId();
+            if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
+            if (durationMs) formData.append("duration_ms", String(durationMs));
+
+            const res = await api.post("/transcribe/", formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+            });
+
+            removeMessage(loadingId);
+
+            const transcription = String(res.data?.transcription || "").trim();
+            const notes = buildNotesFromTranscription(transcription);
+
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: transcription || "Transcription completed, but no text was returned.",
+                type: 'notes',
+                metadata: {
+                    title: "Lecture Notes",
+                    notes: notes.length > 0 ? notes : ["No clear transcript segments were detected."],
+                    duration: formatDuration(durationMs),
+                },
+                createdAt: new Date(),
+            });
+
+            showToast("Transcription completed!", "success");
+        } catch (error: any) {
+            console.error("Transcription failed:", error);
+
+            removeMessage(loadingId);
+
+            const message =
+                error.response?.status === 401
+                    ? "Please log in to transcribe audio."
+                    : error.response?.data?.error || "Failed to transcribe audio. Please try again.";
+
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: message,
+                type: 'text',
+                createdAt: new Date(),
+            });
+
+            showToast(message, "error");
+            throw error;
+        }
+    };
+
+    const handleQuizGenerate = async (config: QuizConfig, content?: string) => {
+        const sourceFile = config.file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
+        if (!sourceFile) return;
         
         const loadingId = nanoid();
         
@@ -74,15 +231,18 @@ export default function Home() {
             role: 'assistant',
             content: "Analyzing your study material and generating quiz questions...",
             type: 'text',
-            timestamp: new Date(),
+            createdAt: new Date(),
         });
 
         try {
             const formData = new FormData();
-            formData.append('file', config.file);
+            formData.append('file', sourceFile);
             formData.append('questionType', config.questionType);
             formData.append('questionCount', config.questionCount.toString());
             formData.append('difficulty', config.difficulty);
+
+            const resolvedChatId = await ensureChatId();
+            if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
             const res = await api.post("/chat/quiz/generate/", formData, {
                 headers: { 'Content-Type': 'multipart/form-data' }
@@ -102,7 +262,7 @@ export default function Home() {
                     difficulty: res.data.difficulty,
                     type: res.data.type
                 },
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
             
             showToast("Quiz generated successfully!", "success");
@@ -117,15 +277,16 @@ export default function Home() {
                 role: 'assistant',
                 content: "Sorry, I couldn't generate the quiz. Please try again with a different file.",
                 type: 'text',
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
             
             showToast(error.response?.data?.error || "Failed to generate quiz", "error");
         }
     };
 
-    const handleSummarize = async (file: File, options: SummaryOptions) => {
-        if (!file) return;
+    const handleSummarize = async (file: File | null, options: SummaryOptions, content?: string) => {
+        const sourceFile = file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
+        if (!sourceFile) return;
         
         const loadingId = nanoid();
         
@@ -135,15 +296,18 @@ export default function Home() {
             role: 'assistant',
             content: "Analyzing your document and creating a summary...",
             type: 'text',
-            timestamp: new Date(),
+            createdAt: new Date(),
         });
 
         try {
             const formData = new FormData();
-            formData.append('file', file);
+            formData.append('file', sourceFile);
             formData.append('length', options.length);
             formData.append('format', options.format);
             formData.append('includeKeyTerms', options.includeKeyTerms.toString());
+
+            const resolvedChatId = await ensureChatId();
+            if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
             const res = await api.post("/chat/summarize/", formData, {
                 headers: { 'Content-Type': 'multipart/form-data' }
@@ -178,7 +342,7 @@ export default function Home() {
                     length: res.data.length,
                     format: res.data.format
                 },
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
             
             showToast("Summary generated successfully!", "success");
@@ -193,7 +357,7 @@ export default function Home() {
                 role: 'assistant',
                 content: "Sorry, I couldn't generate the summary. Please try again with a different file.",
                 type: 'text',
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
             
             showToast(error.response?.data?.error || "Failed to generate summary", "error");

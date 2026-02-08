@@ -218,6 +218,20 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                                 </div>
                                 {isSidebarOpen && <span className="text-sm font-medium text-foreground/80 group-hover:text-foreground">{t.listen}</span>}
                             </button>
+
+                            <button
+                                onClick={() => setActiveModal('stt')}
+                                className={cn(
+                                    "group flex items-center gap-3 rounded-lg hover:bg-white/5 transition-all duration-200",
+                                    isSidebarOpen ? "w-full p-2" : "p-2 justify-center rounded-xl"
+                                )}
+                                title="Transcribe"
+                            >
+                                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-sky-400 via-sky-500 to-sky-600 flex items-center justify-center shadow-md shadow-sky-500/20 group-hover:shadow-sky-500/40 transition-shadow duration-300 shrink-0">
+                                    <Mic className="w-4 h-4 text-white" />
+                                </div>
+                                {isSidebarOpen && <span className="text-sm font-medium text-foreground/80 group-hover:text-foreground">{t.transcribe}</span>}
+                            </button>
                         </div>
                     )}
                     {/* Divider */}

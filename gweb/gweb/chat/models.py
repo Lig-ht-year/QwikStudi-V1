@@ -40,9 +40,13 @@ class ChatHistory(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     prompt = models.TextField()
     response = models.TextField()
-    timestamp = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     context = models.CharField(max_length=100, default='general')  # general, file, audio, etc.
     file = models.ForeignKey('files.File', null=True, blank=True, on_delete=models.SET_NULL, related_name='chat_references')
+    prompt_type = models.CharField(max_length=20, default='text')
+    prompt_metadata = models.JSONField(default=dict, blank=True)
+    response_type = models.CharField(max_length=20, default='text')
+    response_metadata = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return f"ChatMessage {self.id} - {self.user.username}"

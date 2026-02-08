@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
     X,
     Upload,
@@ -11,11 +11,13 @@ import {
     AlignLeft
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useDataStore } from "@/stores/dataStore";
 
 interface SummarizeModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (file: File, options: SummaryOptions) => void;
+    onGenerate: (file: File | null, options: SummaryOptions, content?: string) => void;
+    initialContent?: string;
 }
 
 interface SummaryOptions {
@@ -30,25 +32,38 @@ const lengthOptions = [
     { id: "comprehensive", name: "Comprehensive", description: "Full coverage", words: "~500 words" },
 ];
 
-export function SummarizeModal({ isOpen, onClose, onGenerate }: SummarizeModalProps) {
+export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: SummarizeModalProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [length, setLength] = useState<"brief" | "detailed" | "comprehensive">("detailed");
     const [format, setFormat] = useState<"bullets" | "paragraphs">("bullets");
     const [includeKeyTerms, setIncludeKeyTerms] = useState(true);
     const [isGenerating, setIsGenerating] = useState(false);
+    const clearSelectedContent = useDataStore((state) => state.clearSelectedContent);
+
+    // Get content from store when modal opens (if no initialContent prop)
+    const content = initialContent || useDataStore.getState().selectedContent.content;
+
+    // Clear selected content when modal closes
+    useEffect(() => {
+        if (!isOpen) {
+            clearSelectedContent();
+        }
+    }, [isOpen, clearSelectedContent]);
 
     if (!isOpen) return null;
 
     const handleGenerate = () => {
-        if (!uploadedFile) return;
         setIsGenerating(true);
         // Backend will handle summarization
         setTimeout(() => {
-            onGenerate(uploadedFile, { length, format, includeKeyTerms });
+            onGenerate(uploadedFile, { length, format, includeKeyTerms }, content);
             setIsGenerating(false);
             onClose();
         }, 2000);
     };
+
+    // Check if we have content to summarize (either from file or from message)
+    const hasContent = uploadedFile || content;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -201,10 +216,10 @@ export function SummarizeModal({ isOpen, onClose, onGenerate }: SummarizeModalPr
                 <div className="p-5 border-t border-border/50 flex items-center justify-end bg-muted/20">
                     <button
                         onClick={handleGenerate}
-                        disabled={!uploadedFile || isGenerating}
+                        disabled={!hasContent || isGenerating}
                         className={cn(
                             "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
-                            !uploadedFile || isGenerating
+                            !hasContent || isGenerating
                                 ? "opacity-50 cursor-not-allowed"
                                 : "hover:bg-primary/90 hover:scale-105"
                         )}

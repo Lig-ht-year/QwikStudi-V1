@@ -7,9 +7,10 @@ class ChatHistorySerializer(serializers.ModelSerializer):
         model = ChatHistory
         fields = [
             'id', 'chat', 'user', 'prompt', 'response',
-            'timestamp', 'context', 'file'
+            'created_at', 'context', 'file',
+            'prompt_type', 'prompt_metadata', 'response_type', 'response_metadata'
         ]
-        read_only_fields = ['id', 'timestamp']
+        read_only_fields = ['id', 'created_at']
 
 
 class ChatSerializer(serializers.ModelSerializer):
@@ -33,9 +34,14 @@ class ChatListSerializer(serializers.ModelSerializer):
 from .models import ChatHistory
 
 class ChatMessageSerializer(serializers.ModelSerializer):
+    created_at = serializers.DateTimeField(read_only=True)
+
     class Meta:
         model = ChatHistory
-        fields = ['id', 'prompt', 'response', 'created_at']
+        fields = [
+            'id', 'prompt', 'response', 'created_at',
+            'prompt_type', 'prompt_metadata', 'response_type', 'response_metadata'
+        ]
  
 # chat/serializers.py
 

@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 interface TTSModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (text: string, voice: string) => void;
+    onGenerate: (text: string, voice: string) => Promise<void> | void;
 }
 
 const voices = [
@@ -36,14 +36,14 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
 
     if (!isOpen) return null;
 
-    const handleGenerate = () => {
+    const handleGenerate = async () => {
         setIsGenerating(true);
-        // Backend will handle actual TTS
-        setTimeout(() => {
-            onGenerate(text, selectedVoice);
-            setIsGenerating(false);
+        try {
+            await onGenerate(text, selectedVoice);
             onClose();
-        }, 2000);
+        } finally {
+            setIsGenerating(false);
+        }
     };
 
     const handleFileDrop = (e: React.DragEvent) => {

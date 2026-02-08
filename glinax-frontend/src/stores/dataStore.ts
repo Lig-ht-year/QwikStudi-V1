@@ -17,7 +17,7 @@ interface Message {
     content: string;
     type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
     metadata?: Record<string, unknown>;
-    timestamp: Date;
+    createdAt: Date;
 }
 
 interface ChatSession {
@@ -38,6 +38,11 @@ interface PrivacySettings {
     improveAI: boolean;
 }
 
+interface SelectedContent {
+    type: 'summarize' | 'quiz' | null;
+    content: string;
+}
+
 interface DataState {
     // Authentication
     isLoggedIn: boolean;
@@ -50,14 +55,28 @@ interface DataState {
     removeMessage: (id: string) => void;
     clearMessages: () => void;
 
+    // Selected content for modals (from message bubble actions)
+    selectedContent: SelectedContent;
+    setSelectedContent: (content: SelectedContent) => void;
+    clearSelectedContent: () => void;
+
+    // Limit exceeded state (for guest users)
+    isLimitExceeded: boolean;
+    setIsLimitExceeded: (exceeded: boolean) => void;
+
     // Sessions
     sessions: ChatSession[];
     activeSessionId: string | null;
     setActiveSessionId: (id: string | null) => void;
-    createSession: (title: string) => void;
+    createSession: (title: string, options?: { chatId?: number | null; resetMessages?: boolean; setActive?: boolean; }) => void;
     deleteSession: (id: string) => void;
+    updateSession: (id: string, updates: Partial<ChatSession>) => void;
+    updateSessionByChatId: (chatId: number, updates: Partial<ChatSession>) => void;
     loadChatHistory: (chats: { id: number; title: string }[]) => void;
     clearSessions: () => void;
+    sessionMessages: Record<string, Message[]>;
+    setSessionMessages: (sessionId: string, messages: Message[]) => void;
+    clearSessionMessages: (sessionId: string) => void;
 
     // Active Chat ID (backend persistence)
     chatId: number | null;
@@ -118,6 +137,8 @@ export const useDataStore = create<DataState>()(
                     activeSessionId: null,
                     chatId: null,
                     messages: [],
+                    sessionMessages: {},
+                    isLimitExceeded: false,
                 });
             },
 
@@ -131,22 +152,32 @@ export const useDataStore = create<DataState>()(
             })),
             clearMessages: () => set({ messages: [] }),
 
+            // Selected content for modals (from message bubble actions)
+            selectedContent: { type: null, content: '' },
+            setSelectedContent: (content) => set({ selectedContent: content }),
+            clearSelectedContent: () => set({ selectedContent: { type: null, content: '' } }),
+
+            // Limit exceeded state (for guest users)
+            isLimitExceeded: false,
+            setIsLimitExceeded: (exceeded) => set({ isLimitExceeded: exceeded }),
+
             // Sessions
             sessions: [],
             activeSessionId: null,
             setActiveSessionId: (activeSessionId) => set({ activeSessionId }),
-            createSession: (title) => set((state) => {
+            createSession: (title, options) => set((state) => {
+                const { chatId = null, resetMessages = true, setActive = true } = options || {};
                 const newSession = {
                     id: nanoid(),
                     title,
                     lastMessageAt: new Date(),
-                    chatId: null,
+                    chatId,
                 };
                 return {
                     sessions: [newSession, ...state.sessions],
-                    activeSessionId: newSession.id,
-                    messages: [],
-                    chatId: null,
+                    activeSessionId: setActive ? newSession.id : state.activeSessionId,
+                    messages: resetMessages ? [] : state.messages,
+                    chatId: chatId ?? (resetMessages ? null : state.chatId),
                 };
             }),
             deleteSession: (id) => set((state) => {
@@ -157,8 +188,21 @@ export const useDataStore = create<DataState>()(
                 return {
                     sessions: newSessions,
                     activeSessionId: newActiveId,
+                    sessionMessages: Object.fromEntries(
+                        Object.entries(state.sessionMessages).filter(([sessionId]) => sessionId !== id)
+                    ),
                 };
             }),
+            updateSession: (id, updates) => set((state) => ({
+                sessions: state.sessions.map((session) =>
+                    session.id === id ? { ...session, ...updates } : session
+                ),
+            })),
+            updateSessionByChatId: (chatId, updates) => set((state) => ({
+                sessions: state.sessions.map((session) =>
+                    session.chatId === chatId ? { ...session, ...updates } : session
+                ),
+            })),
             loadChatHistory: (chats: { id: number; title: string }[]) => set(() => {
                 const loadedSessions: ChatSession[] = chats.map(chat => ({
                     id: nanoid(),
@@ -166,11 +210,29 @@ export const useDataStore = create<DataState>()(
                     lastMessageAt: new Date(), // Could be improved to get actual last message time
                     chatId: chat.id,
                 }));
+                const nextActiveId = loadedSessions[0]?.id || null;
+                const nextChatId = loadedSessions[0]?.chatId ?? null;
                 return {
                     sessions: loadedSessions,
+                    activeSessionId: nextActiveId,
+                    chatId: nextChatId,
+                    messages: [],
+                    sessionMessages: {},
                 };
             }),
-            clearSessions: () => set({ sessions: [], activeSessionId: null }),
+            clearSessions: () => set({ sessions: [], activeSessionId: null, sessionMessages: {} }),
+            sessionMessages: {},
+            setSessionMessages: (sessionId, messages) => set((state) => ({
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: messages,
+                },
+            })),
+            clearSessionMessages: (sessionId) => set((state) => {
+                if (!state.sessionMessages[sessionId]) return state;
+                const { [sessionId]: _, ...rest } = state.sessionMessages;
+                return { sessionMessages: rest };
+            }),
 
             // Active Chat ID (backend persistence)
             chatId: null,
@@ -215,6 +277,7 @@ export const useDataStore = create<DataState>()(
                 aiSettings: DEFAULT_AI_SETTINGS,
                 privacySettings: DEFAULT_PRIVACY_SETTINGS,
                 language: 'English',
+                isLimitExceeded: false,
             }),
             exportData: () => {
                 const state = get();
@@ -237,6 +300,9 @@ export const useDataStore = create<DataState>()(
                 profilePicture: state.profilePicture,
                 sessions: state.sessions,
                 messages: state.messages,
+                sessionMessages: state.sessionMessages,
+                activeSessionId: state.activeSessionId,
+                chatId: state.chatId,
                 plan: state.plan,
                 aiSettings: state.aiSettings,
                 privacySettings: state.privacySettings,

@@ -16,7 +16,14 @@ from pdf2image import convert_from_bytes
 import traceback
 
 logger = logging.getLogger(__name__)
-client = OpenAI(api_key=getattr(settings, "OPENAI_API_KEY", None))
+
+
+def get_openai_client():
+    """Lazy initialization of OpenAI client to ensure env vars are loaded."""
+    api_key = getattr(settings, "OPENAI_API_KEY", None) or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    return OpenAI(api_key=api_key)
 
 
 def build_absolute_media_url(relative_url):
@@ -68,6 +75,7 @@ def _summarize_pdf_public(path):
 
 
 def _vision_chat_public(image_url):
+    client = get_openai_client()
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -87,6 +95,7 @@ def _vision_chat_public(image_url):
 
 
 def summarize_text(text):
+    client = get_openai_client()
     resp = client.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -100,6 +109,7 @@ def summarize_text(text):
 
 def transcribe_audio(file_path: str) -> str:
     try:
+        client = get_openai_client()
         with open(file_path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 file=audio_file,

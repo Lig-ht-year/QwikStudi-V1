@@ -43,10 +43,23 @@ export default function SignupPage() {
         setError("");
 
         try {
+            const normalizedEmail = email.trim().toLowerCase();
+            const emailPrefix = normalizedEmail.split("@")[0] || "";
+            const username = emailPrefix
+                .toLowerCase()
+                .replace(/[^a-z0-9._-]/g, "")
+                .slice(0, 30) || name.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 30);
+
+            if (!username) {
+                setError("Please use an email with letters or numbers.");
+                setIsLoading(false);
+                return;
+            }
+
             // Call Django registration endpoint
             const res = await api.post("/auth/register/", {
-                username: name,
-                email,
+                username,
+                email: normalizedEmail,
                 password,
             });
 

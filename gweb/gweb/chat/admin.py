@@ -13,8 +13,8 @@ class ChatAdmin(admin.ModelAdmin):
 
 @admin.register(ChatHistory)
 class ChatHistoryAdmin(admin.ModelAdmin):
-    list_display = ('id', 'chat', 'user', 'timestamp', 'context')
-    list_filter = ('context', 'timestamp')
+    list_display = ('id', 'chat', 'user', 'created_at', 'context')
+    list_filter = ('context', 'created_at')
     search_fields = ('prompt', 'response', 'user__username')
     raw_id_fields = ('chat', 'user')
 

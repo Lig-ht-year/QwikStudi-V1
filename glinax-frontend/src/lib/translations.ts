@@ -13,6 +13,7 @@ export const translations = {
         quiz: "Quiz",
         summarize: "Summarize",
         listen: "Listen",
+        transcribe: "Transcribe",
         settings: "Settings",
         help: "Help & Support",
         logout: "Logout",
@@ -58,7 +59,10 @@ export const translations = {
         greeting_afternoon: "Good afternoon",
         greeting_evening: "Good evening",
         greeting_generic: "Hi, there",
-        whatToStudy: "What would you like to study today?"
+        whatToStudy: "What would you like to study today?",
+        limitExceeded: "Chat Limit Reached",
+        limitExceededMessage: "You've reached your guest chat limit. Please log in to continue.",
+        loginToContinue: "Log in / Register"
     },
     French: {
         newChat: "Nouvelle Discussion",
@@ -73,6 +77,7 @@ export const translations = {
         quiz: "Quiz",
         summarize: "Résumer",
         listen: "Écouter",
+        transcribe: "Transcrire",
         settings: "Paramètres",
         help: "Aide & Support",
         logout: "Déconnexion",
@@ -118,7 +123,10 @@ export const translations = {
         greeting_afternoon: "Bon après-midi",
         greeting_evening: "Bonsoir",
         greeting_generic: "Salut",
-        whatToStudy: "Que voulez-vous étudier aujourd'hui ?"
+        whatToStudy: "Que voulez-vous étudier aujourd'hui ?",
+        limitExceeded: "Limite de discussion atteinte",
+        limitExceededMessage: "Vous avez atteint votre limite de discussion en tant qu'invité. Veuillez vous connecter pour continuer.",
+        loginToContinue: "Se connecter / S'inscrire"
     },
     Twi: {
         newChat: "Nkɔmmɔ Foforo",
@@ -133,6 +141,7 @@ export const translations = {
         quiz: "Sɔhwɛ",
         summarize: "Bɔ mua",
         listen: "Tie",
+        transcribe: "Transcribe",
         settings: "Nsesae",
         help: "Mmoa",
         logout: "Pue",
@@ -178,6 +187,9 @@ export const translations = {
         greeting_afternoon: "Maaha",
         greeting_evening: "Maadwo",
         greeting_generic: "Mema wo ahyia",
-        whatToStudy: "Dɛn na wopɛ sɛ wosua ɛnnɛ?"
+        whatToStudy: "Dɛn na wopɛ sɛ wosua ɛnnɛ?",
+        limitExceeded: "Nkomhyɛ Asɛe",
+        limitExceededMessage: "Woatwa nkɔmmɔ a ɛtwa adwene ho asɛm yi. Mesrɛ wo nkɔ asɛ.",
+        loginToContinue: "Nkɔ asɛ / Wɔ new account"
     }
 };

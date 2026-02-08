@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 interface STTRecorderProps {
     isOpen: boolean;
     onClose: () => void;
-    onProcess: (audioBlob: Blob) => void;
+    onProcess: (audioFile: File, durationMs?: number) => Promise<void> | void;
 }
 
 export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
@@ -26,14 +26,21 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const chunksRef = useRef<BlobPart[]>([]);
+    const stopResolveRef = useRef<((file: File | null) => void) | null>(null);
+    const discardNextStopRef = useRef(false);
+    const recordingStartRef = useRef<number | null>(null);
+    const recordingDurationRef = useRef<number>(0);
     const waveformBars = 40;
 
     useEffect(() => {
         if (isRecording && !isPaused) {
             timerRef.current = setInterval(() => {
-                setRecordingTime((t) => t + 1);
+                setRecordingTime((t) => t + 1000);
                 setAudioLevel(Math.random() * 100);
-            }, 100);
+            }, 1000);
         } else {
             if (timerRef.current) clearInterval(timerRef.current);
         }
@@ -45,32 +52,195 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
     if (!isOpen) return null;
 
     const formatTime = (ms: number) => {
-        const totalSeconds = Math.floor(ms / 10);
+        const totalSeconds = Math.floor(ms / 1000);
         const minutes = Math.floor(totalSeconds / 60);
         const seconds = totalSeconds % 60;
         return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
     };
 
-    const startRecording = () => {
-        setIsRecording(true);
-        setIsPaused(false);
-        setRecordingTime(0);
+    const cleanupStream = () => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach((track) => track.stop());
+            streamRef.current = null;
+        }
     };
 
-    const stopRecording = () => {
+    const resetRecorderState = () => {
         setIsRecording(false);
         setIsPaused(false);
+        setRecordingTime(0);
+        setAudioLevel(0);
+        chunksRef.current = [];
+        mediaRecorderRef.current = null;
+        cleanupStream();
+    };
+
+    const getFileExtension = (mimeType: string) => {
+        if (mimeType.includes("webm")) return "webm";
+        if (mimeType.includes("ogg")) return "ogg";
+        if (mimeType.includes("mp4")) return "mp4";
+        if (mimeType.includes("mpeg")) return "mp3";
+        return "webm";
+    };
+
+    const getSupportedMimeType = () => {
+        const candidates = [
+            "audio/webm;codecs=opus",
+            "audio/webm",
+            "audio/ogg;codecs=opus",
+            "audio/ogg",
+        ];
+        for (const type of candidates) {
+            if (MediaRecorder.isTypeSupported(type)) {
+                return type;
+            }
+        }
+        return "";
+    };
+
+    const startRecording = async () => {
+        if (isProcessing) return;
+        if (!navigator.mediaDevices?.getUserMedia) {
+            alert("Audio recording is not supported in this browser.");
+            return;
+        }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+            const preferredMime = getSupportedMimeType();
+            const recorder = preferredMime
+                ? new MediaRecorder(stream, { mimeType: preferredMime, audioBitsPerSecond: 128000 })
+                : new MediaRecorder(stream, { audioBitsPerSecond: 128000 });
+            mediaRecorderRef.current = recorder;
+            chunksRef.current = [];
+            recordingStartRef.current = performance.now();
+            recordingDurationRef.current = 0;
+
+            recorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    chunksRef.current.push(event.data);
+                }
+            };
+
+            recorder.onstop = () => {
+                const shouldDiscard = discardNextStopRef.current;
+                discardNextStopRef.current = false;
+
+                const blob = new Blob(chunksRef.current, {
+                    type: recorder.mimeType || "audio/webm",
+                });
+                chunksRef.current = [];
+                cleanupStream();
+
+                if (shouldDiscard) {
+                    stopResolveRef.current?.(null);
+                    stopResolveRef.current = null;
+                    return;
+                }
+
+                const durationMs = recordingStartRef.current
+                    ? Math.max(0, performance.now() - recordingStartRef.current)
+                    : 0;
+                recordingDurationRef.current = durationMs;
+
+                if (durationMs < 1000) {
+                    alert("Recording is too short. Please record at least 1 second and try again.");
+                    stopResolveRef.current?.(null);
+                    stopResolveRef.current = null;
+                    return;
+                }
+
+                const ext = getFileExtension(blob.type || "audio/webm");
+                const file = blob.size
+                    ? new File([blob], `lecture-recording-${Date.now()}.${ext}`, { type: blob.type || "audio/webm" })
+                    : null;
+
+                stopResolveRef.current?.(file);
+                stopResolveRef.current = null;
+            };
+
+            recorder.start(250);
+            setIsRecording(true);
+            setIsPaused(false);
+            setRecordingTime(0);
+            setUploadedFile(null);
+        } catch (error) {
+            console.error("Failed to start recording:", error);
+            cleanupStream();
+            alert("Unable to access your microphone. Please allow microphone permissions and try again.");
+        }
+    };
+
+    const stopRecording = async () => {
+        if (!mediaRecorderRef.current || mediaRecorderRef.current.state === "inactive") {
+            return;
+        }
+
+        discardNextStopRef.current = false;
         setIsProcessing(true);
-        // Backend will handle actual STT
-        setTimeout(() => {
-            onProcess(new Blob());
+        setIsRecording(false);
+        setIsPaused(false);
+        try {
+            const recordedFile = await new Promise<File | null>((resolve) => {
+                stopResolveRef.current = resolve;
+                mediaRecorderRef.current?.stop();
+            });
+
+            if (!recordedFile) {
+                setIsProcessing(false);
+                resetRecorderState();
+                return;
+            }
+
+            const durationMs = recordingDurationRef.current || recordingTime * 100;
+            await onProcess(recordedFile, durationMs);
             setIsProcessing(false);
+            resetRecorderState();
             onClose();
-        }, 2000);
+        } catch (error) {
+            console.error("Recording processing failed:", error);
+            setIsProcessing(false);
+        }
     };
 
     const togglePause = () => {
-        setIsPaused(!isPaused);
+        const recorder = mediaRecorderRef.current;
+        if (!recorder) return;
+
+        if (recorder.state === "recording") {
+            recorder.pause();
+            setIsPaused(true);
+        } else if (recorder.state === "paused") {
+            recorder.resume();
+            setIsPaused(false);
+        }
+    };
+
+    const handleClose = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+            discardNextStopRef.current = true;
+            mediaRecorderRef.current.stop();
+        }
+        resetRecorderState();
+        setUploadedFile(null);
+        setIsProcessing(false);
+        onClose();
+    };
+
+    const handleProcessUpload = async () => {
+        if (!uploadedFile) return;
+        setIsProcessing(true);
+        try {
+            await onProcess(uploadedFile);
+            setIsProcessing(false);
+            setUploadedFile(null);
+            resetRecorderState();
+            onClose();
+        } catch (error) {
+            console.error("Upload processing failed:", error);
+            setIsProcessing(false);
+        }
     };
 
     return (
@@ -78,7 +248,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
             {/* Backdrop */}
             <div
                 className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-                onClick={onClose}
+                onClick={handleClose}
             />
 
             {/* Modal */}
@@ -95,7 +265,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                         </div>
                     </div>
                     <button
-                        onClick={onClose}
+                        onClick={handleClose}
                         className="p-1.5 hover:bg-muted/50 rounded-full transition-colors text-muted-foreground hover:text-foreground"
                     >
                         <X className="w-4 h-4" />
@@ -205,7 +375,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
 
                     {uploadedFile && (
                         <button
-                            onClick={stopRecording}
+                            onClick={handleProcessUpload}
                             disabled={isProcessing}
                             className="w-full py-2.5 bg-primary text-primary-foreground rounded-lg font-semibold flex items-center justify-center gap-2 hover:bg-primary/90 transition-all text-xs shadow-lg shadow-primary/20"
                         >

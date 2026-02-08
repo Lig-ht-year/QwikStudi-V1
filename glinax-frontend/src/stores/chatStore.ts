@@ -35,7 +35,7 @@ interface Message {
     content: string;
     type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
     metadata?: Record<string, unknown>;
-    timestamp: Date;
+    createdAt: Date;
 }
 
 interface ChatSession {
@@ -69,7 +69,7 @@ interface ChatState {
     sessions: ChatSession[];
     activeSessionId: string | null;
     setActiveSessionId: (id: string | null) => void;
-    createSession: (title: string) => void;
+    createSession: (title: string, options?: { chatId?: number | null; resetMessages?: boolean; setActive?: boolean; }) => void;
     clearSessions: () => void;
 
     // UI State (delegates to useUIStore)

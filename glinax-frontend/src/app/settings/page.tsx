@@ -387,9 +387,10 @@ export default function SettingsPage() {
         setPrivacySettings,
         clearAllData,
         exportData,
-        activeModal,
-        setActiveModal
     } = useChatStore();
+
+    const activeModal = useUIStore((state) => state.activeModal);
+    const setActiveModal = useUIStore((state) => state.setActiveModal);
 
     // Use Data Store for Language
     const language = useDataStore((state) => state.language);

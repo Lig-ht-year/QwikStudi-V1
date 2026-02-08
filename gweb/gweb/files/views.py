@@ -1,4 +1,7 @@
 import io
+import wave
+import audioop
+import math
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -31,13 +34,44 @@ import logging
 import tempfile
 from django.http import HttpResponse, FileResponse, JsonResponse
 import os
+import subprocess
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from chat.models import Chat, ChatHistory, ChatCollaborator
+import re
 
 logger = logging.getLogger(__name__)
-client = OpenAI(api_key=getattr(settings, "OPENAI_API_KEY", None))
+
+
+def get_openai_client():
+    """Lazy initialization of OpenAI client to ensure env vars are loaded."""
+    api_key = getattr(settings, "OPENAI_API_KEY", None) or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    return OpenAI(api_key=api_key)
+
+def _get_chat_for_write(user, chat_id):
+    if not chat_id:
+        return None
+    try:
+        chat = Chat.objects.get(id=chat_id)
+    except Chat.DoesNotExist:
+        return None
+    if chat.user == user:
+        return chat
+    collaborator = ChatCollaborator.objects.filter(
+        chat=chat, collaborator=user, is_approved=True, access_level="edit"
+    ).first()
+    return chat if collaborator else None
+
+def _build_notes_from_transcription(text):
+    sentences = re.split(r"(?:\r?\n)+|[.!?]\s+", text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if len(sentences) <= 8:
+        return sentences
+    return sentences[:8]
 
 class ScoreQuestionsAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -67,6 +101,7 @@ class ScoreQuestionsAPIView(APIView):
                     "user_answer": user_answers.get(q_id, "") if user_answers is not None else ""
                 })
             prompt = self.build_prompt(context_snippet, qset)
+            client = get_openai_client()
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -125,7 +160,7 @@ class GenerateAudioAPIView(APIView):
 
     def post(self, request, *args, **kwargs):
         try:
-            client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", getattr(settings, "OPENAI_API_KEY", None)))
+            client = get_openai_client()
             text_input = None
             user = request.user
 
@@ -210,12 +245,12 @@ class QuickGenerateAudioAPIView(APIView):
             if not text:
                 return JsonResponse({"error": "No text provided"}, status=400)
 
-            client = OpenAI(api_key=getattr(settings, "OPENAI_API_KEY", None))
+            client = get_openai_client()
             response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice="alloy",
                 input=text
-        )
+            )
             if hasattr(response, "iter_bytes"):
                 audio_bytes = b"".join(response.iter_bytes())
             else:
@@ -470,18 +505,129 @@ class TranscribeAPIView(APIView):
             if not hasattr(request, "FILES") or not request.FILES.get("file"):
                 return Response({"error": "No file provided. Use multipart/form-data upload with 'file'."}, status=400)
             file = request.FILES.get('file')
+            chat_id = request.data.get("chat_id")
+            duration_ms = request.data.get("duration_ms")
             try:
+                client = get_openai_client()
+                # The OpenAI SDK accepts bytes, IOBase, PathLike, or a tuple (filename, contents, media type).
+                # Django's InMemoryUploadedFile isn't an IOBase, so wrap it with filename, bytes, and content type.
+                try:
+                    file.seek(0)
+                except Exception:
+                    pass
+                file_bytes = file.read()
+                if not file_bytes:
+                    return Response({"error": "Uploaded audio is empty. Please record again."}, status=400)
+                content_type = file.content_type or "application/octet-stream"
+                filename = file.name
+
+                logger.info(
+                    "STT upload: name=%s type=%s size=%s",
+                    filename,
+                    content_type,
+                    len(file_bytes),
+                )
+
+                # If webm/ogg, try converting to mono 16k wav for more reliable transcription
+                is_webm = content_type.startswith("audio/webm") or content_type.startswith("video/webm") or filename.lower().endswith(".webm")
+                is_ogg = content_type.startswith("audio/ogg") or content_type.startswith("audio/oga") or filename.lower().endswith((".ogg", ".oga"))
+                if is_webm or is_ogg:
+                    try:
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            src_path = os.path.join(tmpdir, "input")
+                            dst_path = os.path.join(tmpdir, "output.wav")
+                            with open(src_path, "wb") as f:
+                                f.write(file_bytes)
+
+                            logger.info("STT converting to wav via ffmpeg (type=%s name=%s)", content_type, filename)
+                            result = subprocess.run(
+                                ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", dst_path],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                check=False,
+                            )
+
+                            if result.returncode == 0 and os.path.exists(dst_path):
+                                with open(dst_path, "rb") as f:
+                                    file_bytes = f.read()
+                                content_type = "audio/wav"
+                                filename = os.path.splitext(filename)[0] + ".wav"
+                                logger.info("STT converted to wav: size=%s", len(file_bytes))
+                            else:
+                                logger.warning("STT ffmpeg convert failed: %s", result.stderr[:200])
+                    except Exception as convert_e:
+                        logger.warning("STT convert exception: %s", convert_e)
+
+                # If we have wav bytes, check for very low volume / silence
+                if content_type == "audio/wav":
+                    try:
+                        with wave.open(io.BytesIO(file_bytes), "rb") as wf:
+                            frames = wf.readframes(wf.getnframes())
+                            rms = audioop.rms(frames, wf.getsampwidth())
+                            if rms == 0:
+                                dbfs = -999.0
+                            else:
+                                dbfs = 20 * math.log10(rms / 32768.0)
+                            duration_s = wf.getnframes() / float(wf.getframerate())
+                        logger.info("STT wav stats: duration=%.2fs rms=%s dbfs=%.2f", duration_s, rms, dbfs)
+                        if duration_s < 2.0 or dbfs < -40.0:
+                            return Response(
+                                {"error": "No clear speech detected. Please record louder or move closer to the mic."},
+                                status=400,
+                            )
+                    except Exception as audio_check_e:
+                        logger.warning("STT wav check failed: %s", audio_check_e)
+
+                file_tuple = (filename, file_bytes, content_type)
+
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=file,
+                    file=file_tuple,
                     response_format="text"
                 )
                 transcription_text = response
+                try:
+                    file.seek(0)
+                except Exception:
+                    pass
+                audio_obj = Audio.objects.create(
+                    user=request.user,
+                    audio=file,
+                    source_type="transcription",
+                    language=None,
+                )
                 transcription_obj = Transcription.objects.create(
                     user=request.user,
+                    audio=audio_obj,
                     transcription=transcription_text,
-                    source_filename=file.name
+                    language=None,
                 )
+                chat = _get_chat_for_write(request.user, chat_id)
+                if chat:
+                    notes = _build_notes_from_transcription(transcription_text)
+                    duration_display = None
+                    try:
+                        if duration_ms is not None:
+                            duration_s = max(0, round(float(duration_ms) / 1000))
+                            minutes = duration_s // 60
+                            seconds = duration_s % 60
+                            duration_display = f"{minutes:02d}:{seconds:02d}"
+                    except Exception:
+                        duration_display = None
+                    ChatHistory.objects.create(
+                        chat=chat,
+                        user=request.user,
+                        prompt="",
+                        response=transcription_text,
+                        prompt_type="text",
+                        response_type="notes",
+                        response_metadata={
+                            "title": "Lecture Notes",
+                            "notes": notes if notes else ["No clear transcript segments were detected."],
+                            "duration": duration_display,
+                        },
+                        context="notes",
+                    )
                 return Response({
                     "success": True,
                     "transcription": transcription_text,
@@ -531,4 +677,3 @@ class ShareAudioAPIView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
         serializer = SharedAudioSerializer(obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
-

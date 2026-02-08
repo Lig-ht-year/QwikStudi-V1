@@ -1,5 +1,5 @@
 import logging
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -25,13 +25,31 @@ from .serializers import (
 )
 from django.core.files.base import ContentFile
 from.models import TextToSpeech
-from .utils import get_client_ip, generate_chat_title_from_openai
+from .utils import get_client_ip, generate_chat_title_from_openai, get_openai_client
 
 from g_auth.models import GuestChatTracker, GuestIPTracker
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+def _sanitize_response_text(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    # Remove markdown symbols the user doesn't want shown.
+    return text.replace("#", "").replace("*", "")
+
+def _get_chat_for_write(user, chat_id):
+    if not chat_id:
+        return None
+    try:
+        chat = Chat.objects.get(id=chat_id)
+    except Chat.DoesNotExist:
+        return None
+    if chat.user == user:
+        return chat
+    collaborator = ChatCollaborator.objects.filter(
+        chat=chat, collaborator=user, is_approved=True, access_level="edit"
+    ).first()
+    return chat if collaborator else None
 
 class AddCollaboratorAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -173,16 +191,12 @@ class ChatAPIView(APIView):
         # Guest user flow
         if not user:
             if not guest_id:
-                return Response({
-                    "error": "Guest session expired. Please refresh and try again."
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-            try:
-                guest_uuid = UUID(guest_id)
-            except ValueError:
-                return Response({
-                    "error": "Invalid guest session ID. Please refresh the page."
-                }, status=status.HTTP_400_BAD_REQUEST)
+                guest_uuid = uuid4()
+            else:
+                try:
+                    guest_uuid = UUID(guest_id)
+                except ValueError:
+                    guest_uuid = uuid4()
 
             guest_tracker, _ = GuestChatTracker.objects.get_or_create(guest_id=guest_uuid)
             ip_tracker, _ = GuestIPTracker.objects.get_or_create(ip_address=ip)
@@ -269,7 +283,7 @@ Remember: Your goal is to help users become better learners, not just to answer 
 
         # Add conversation history if chat exists and user is authenticated
         if user and chat:
-            recent_messages = ChatHistory.objects.filter(chat=chat).order_by('-timestamp')[:20]  # Last 20 messages for context
+            recent_messages = ChatHistory.objects.filter(chat=chat).order_by('-created_at')[:20]  # Last 20 messages for context
             # Reverse to get chronological order and truncate long messages
             for msg in reversed(recent_messages):
                 # Truncate individual messages to preserve token limits (max 500 chars per message)
@@ -303,13 +317,14 @@ Remember: Your goal is to help users become better learners, not just to answer 
         config = style_configs.get(response_style, style_configs["balanced"])
 
         try:
+            client = get_openai_client()
             res = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=messages,
                 temperature=config["temperature"],
                 max_tokens=config["max_tokens"],
             )
-            bot_reply = res.choices[0].message.content
+            bot_reply = _sanitize_response_text(res.choices[0].message.content)
         except Exception as e:
             logger.error(f"[OpenAI Error] {e}", exc_info=True)
             return Response({
@@ -323,7 +338,10 @@ Remember: Your goal is to help users become better learners, not just to answer 
                     chat=chat,
                     user=user,
                     prompt=prompt,
-                    response=bot_reply
+                    response=bot_reply,
+                    prompt_type="text",
+                    response_type="text",
+                    context="general"
                 )
             except Exception as e:
                 logger.warning(f"[History Save Fail] {e}", exc_info=True)
@@ -335,11 +353,15 @@ Remember: Your goal is to help users become better learners, not just to answer 
             ip_tracker.count += 1
             ip_tracker.save()
 
-        return Response({
+        response_payload = {
             "chat_id": chat.id if chat else None,
             "response": bot_reply,
             "limit_exceeded": False
-        }, status=status.HTTP_200_OK)
+        }
+        if not user:
+            response_payload["guest_id"] = str(guest_uuid)
+
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 
@@ -400,7 +422,7 @@ class CommitChatView(APIView):
         if not is_owner and not has_edit_access:
             return Response({"error": "You do not have permission to modify this chat."}, status=403)
 
-        messages = list(ChatHistory.objects.filter(chat=chat).order_by("timestamp")[:2])
+        messages = list(ChatHistory.objects.filter(chat=chat).order_by("created_at")[:2])
 
         if len(messages) < 2:
             return Response(
@@ -666,6 +688,8 @@ class TextToAudioView(APIView):
         text = request.data.get('text')
         if not text:
             return Response({"error": "No text provided"}, status=400)
+        chat_id = request.data.get("chat_id")
+        voice = request.data.get("voice", "alloy")
         
         # Validate text length (prevent cost abuse - TTS is priced per character)
         MAX_TTS_LENGTH = 500
@@ -677,9 +701,10 @@ class TextToAudioView(APIView):
         
         try:
             # Generate speech using OpenAI TTS
+            client = get_openai_client()
             response = client.audio.speech.create(
                 model="tts-1",
-                voice="alloy",
+                voice=voice,
                 input=text
             )
             
@@ -692,10 +717,29 @@ class TextToAudioView(APIView):
             # Save the audio file
             file_path = f"text_to_speech/{tts_obj.id}.mp3"
             tts_obj.audio_file.save(file_path, ContentFile(response.content))
-            
+            audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
+
+            chat = _get_chat_for_write(request.user, chat_id)
+            if chat:
+                ChatHistory.objects.create(
+                    chat=chat,
+                    user=request.user,
+                    prompt="",
+                    response="I've generated audio for your text. Click play to listen.",
+                    prompt_type="text",
+                    response_type="audio",
+                    response_metadata={
+                        "title": "Generated Audio",
+                        "audio_url": audio_url,
+                        "voice": voice,
+                        "transcript": text,
+                    },
+                    context="audio",
+                )
+
             return Response({
                 "id": tts_obj.id,
-                "audio_url": request.build_absolute_uri(tts_obj.audio_file.url)
+                "audio_url": audio_url
             })
             
         except Exception as e:
@@ -775,6 +819,7 @@ class QuizGenerateAPIView(APIView):
         question_type = request.data.get("questionType", "mcq")
         question_count = int(request.data.get("questionCount", 10))
         difficulty = request.data.get("difficulty", "medium")
+        chat_id = request.data.get("chat_id")
         
         # Get uploaded file
         if 'file' not in request.FILES:
@@ -843,6 +888,7 @@ DO NOT include any markdown code blocks, DO NOT include any other text.
 Only return valid JSON, nothing else.
 """
             
+            client = get_openai_client()
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
@@ -960,6 +1006,24 @@ Only return valid JSON, nothing else.
                     {"error": "Failed to generate valid quiz questions. Please try again."},
                     status=500
                 )
+
+            chat = _get_chat_for_write(request.user, chat_id)
+            if chat:
+                ChatHistory.objects.create(
+                    chat=chat,
+                    user=request.user,
+                    prompt="",
+                    response=f"I've generated {len(normalized_questions)} quiz questions based on your study material. Test your knowledge!",
+                    prompt_type="text",
+                    response_type="quiz",
+                    response_metadata={
+                        "title": "Generated Quiz",
+                        "questions": normalized_questions,
+                        "difficulty": difficulty,
+                        "type": question_type,
+                    },
+                    context="quiz",
+                )
             
             return Response({
                 "questions": normalized_questions,
@@ -983,6 +1047,7 @@ class SummarizeAPIView(APIView):
         length = request.data.get("length", "detailed")  # brief, detailed, comprehensive
         format_type = request.data.get("format", "bullets")  # bullets, paragraphs
         include_key_terms = request.data.get("includeKeyTerms", True)
+        chat_id = request.data.get("chat_id")
         
         # Get uploaded file
         if 'file' not in request.FILES:
@@ -1047,6 +1112,7 @@ Return the response as a JSON object with this structure:
 Only return valid JSON, no additional text.
 """
             
+            client = get_openai_client()
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
@@ -1056,7 +1122,7 @@ Only return valid JSON, no additional text.
                 temperature=0.5,
                 max_tokens=1500
             )
-            
+
             import json
             result = response.choices[0].message.content
             
@@ -1088,6 +1154,27 @@ Only return valid JSON, no additional text.
                     if content:
                         formatted_parts.append(f"## {section}\n{content}")
                 summary_content = "\n\n".join(formatted_parts)
+            summary_content = _sanitize_response_text(summary_content)
+
+            chat = _get_chat_for_write(request.user, chat_id)
+            if chat:
+                ChatHistory.objects.create(
+                    chat=chat,
+                    user=request.user,
+                    prompt="",
+                    response=summary_content,
+                    prompt_type="text",
+                    response_type="summary",
+                    response_metadata={
+                        "title": "Document Summary",
+                        "summary": summary_content,
+                        "takeaways": summary_data.get("takeaways", []),
+                        "keyTerms": summary_data.get("keyTerms", []),
+                        "length": length,
+                        "format": format_type,
+                    },
+                    context="summary",
+                )
 
             return Response({
                 "summary": summary_content,
