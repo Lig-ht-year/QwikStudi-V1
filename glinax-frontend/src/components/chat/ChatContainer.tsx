@@ -334,7 +334,7 @@ export function ChatContainer() {
                                 key={message.id}
                                 role={message.role}
                                 content={message.content}
-                                timestamp={message.timestamp}
+                                createdAt={message.createdAt}
                                 type={message.type}
                                 metadata={message.metadata}
                                 onRegenerate={message.role === 'assistant' ? handleRegenerate : undefined}
