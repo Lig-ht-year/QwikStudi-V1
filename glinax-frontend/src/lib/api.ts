@@ -1,8 +1,11 @@
 import axios from "axios";
 import { useDataStore } from "@/stores/dataStore";
 
+const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const apiBaseUrl = rawApiUrl.replace(/\/+$/, "").replace(/\/chat$/, "");
+
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL,
+  baseURL: apiBaseUrl,
   headers: {
     "Content-Type": "application/json",
   },
@@ -35,7 +38,7 @@ api.interceptors.response.use(
 
       try {
         const res = await axios.post(
-          `${process.env.NEXT_PUBLIC_API_URL}/auth/token/refresh/`, {
+          `${apiBaseUrl}/auth/token/refresh/`, {
           refresh: localStorage.getItem("refresh"),
         });
 
