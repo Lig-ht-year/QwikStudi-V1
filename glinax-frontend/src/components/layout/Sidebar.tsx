@@ -23,6 +23,7 @@ import {
     Trash2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatDisplayName } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import { useTheme } from "next-themes";
@@ -354,8 +355,8 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             </div>
                             {isSidebarOpen && (
                                 <div className="flex-1 overflow-hidden">
-                                    <p className="text-sm font-semibold text-foreground truncate">
-                                        {username || 'Guest'}
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-foreground truncate">
+                                        {formatDisplayName(username, 'Guest')}
                                     </p>
                                     {plan === 'pro' ? (
                                         <p className="text-xs text-primary truncate font-medium flex items-center gap-1">

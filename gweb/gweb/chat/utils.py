@@ -63,8 +63,9 @@ def text_to_audio(user, text):
             text=text
         )
 
-        file_path = f"text_to_speech/{tts_obj.id}.mp3"
-        tts_obj.audio_file.save(file_path, ContentFile(response.content))
+        # `audio_file` already prefixes upload_to='text_to_speech/'.
+        file_name = f"{tts_obj.id}.mp3"
+        tts_obj.audio_file.save(file_name, ContentFile(response.content))
 
         return tts_obj
     except Exception as e:

@@ -745,8 +745,9 @@ class TextToAudioView(APIView):
             )
             
             # Save the audio file
-            file_path = f"text_to_speech/{tts_obj.id}.mp3"
-            tts_obj.audio_file.save(file_path, ContentFile(response.content))
+            # `audio_file` has upload_to='text_to_speech/', so save only the filename.
+            file_name = f"{tts_obj.id}.mp3"
+            tts_obj.audio_file.save(file_name, ContentFile(response.content))
             audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
 
             if not premium_active:

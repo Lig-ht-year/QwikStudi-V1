@@ -127,7 +127,24 @@ export const useDataStore = create<DataState>()(
         (set, get) => ({
             // Authentication
             isLoggedIn: false,
-            login: (username) => set({ isLoggedIn: true, username }),
+            login: (username) => set((state) => {
+                const shouldReset = !state.isLoggedIn || state.username !== username;
+                return {
+                    isLoggedIn: true,
+                    username,
+                    ...(shouldReset
+                        ? {
+                            profilePicture: null,
+                            sessions: [],
+                            activeSessionId: null,
+                            chatId: null,
+                            messages: [],
+                            sessionMessages: {},
+                            isLimitExceeded: false,
+                        }
+                        : {}),
+                };
+            }),
             logout: () => {
                 localStorage.removeItem("access");
                 localStorage.removeItem("refresh");
@@ -165,7 +182,7 @@ export const useDataStore = create<DataState>()(
             },
             setAuthUser: (user) => set((state) => {
                 const nextUsername = user?.username ?? '';
-                const shouldReset = state.username && state.username !== nextUsername;
+                const shouldReset = !state.isLoggedIn || state.username !== nextUsername;
                 return {
                     isLoggedIn: true,
                     username: nextUsername,

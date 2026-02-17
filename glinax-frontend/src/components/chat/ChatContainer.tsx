@@ -7,6 +7,7 @@ import { ChatInput } from "./ChatInput";
 import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import { translations } from "@/lib/translations";
+import { formatDisplayName } from "@/lib/utils";
 import { Brain, FileText, Headphones, Sparkles } from "lucide-react";
 import { getChatMessages } from "@/lib/getChatMessages";
 import { nanoid } from "nanoid";
@@ -165,7 +166,7 @@ export function ChatContainer() {
     // Get display name
     const displayName = useMemo(() => {
         if (!isLoggedIn) return t.guest || "Guest";
-        return username || t.guest || "Guest";
+        return formatDisplayName(username, t.guest || "Guest");
     }, [isLoggedIn, username, t.guest]);
 
     // Load messages when a session is selected
