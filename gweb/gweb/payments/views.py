@@ -221,18 +221,13 @@ def payment_status(request):
 @login_required
 def generate_question(request):
     """Improved usage tracking with rate limiting and clear error messages"""
-    profile, _ = UserProfile.objects.get_or_create(user=request.user)
+    profile = request.user.userprofile
     question_type = request.GET.get('type', 'mcq').lower()
-    today = timezone.now().date()
-    premium_active = bool(profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today)
-    if profile.is_premium and not premium_active:
-        profile.is_premium = False
-        profile.save(update_fields=["is_premium"])
 
     app_logger = logging.getLogger('django')
 
     # Block premium types first for free users
-    if not premium_active and question_type in ['theory', 'true_false', 'fill_in']:
+    if not profile.is_premium and question_type in ['theory', 'true_false', 'fill_in']:
         app_logger.info(f"User {getattr(profile, 'user_id', 'unknown')} attempted premium question type '{question_type}' without premium.")
         return JsonResponse(
             {'error': 'This question type requires a premium subscription.'},
@@ -240,9 +235,9 @@ def generate_question(request):
         )
 
     # Then enforce usage limits for free users
-    if not premium_active and profile.questions_generated >= 20:
+    if not profile.is_premium and profile.questions_generated >= 20:
         app_logger.info(f"User {getattr(profile, 'user_id', 'unknown')} hit free question generation limit.")
-        return JsonResponse(
+    return JsonResponse(
             {'error': 'You have reached your free question limit. Upgrade to premium to continue.'},
             status=429
         )
@@ -251,7 +246,7 @@ def generate_question(request):
     question = f"Sample {question_type} question."
 
     # Only update usage counter for free users and successful generate
-    if not premium_active:
+    if not profile.is_premium:
         profile.questions_generated += 1
         profile.save()
 
@@ -260,19 +255,14 @@ def generate_question(request):
 @login_required
 def generate_audio(request):
     """Audio generation with usage tracking"""
-    profile, _ = UserProfile.objects.get_or_create(user=request.user)
-    today = timezone.now().date()
-    premium_active = bool(profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today)
-    if profile.is_premium and not premium_active:
-        profile.is_premium = False
-        profile.save(update_fields=["is_premium"])
+    profile = request.user.userprofile
     
     try:
         minutes = min(float(request.GET.get('minutes', 1.0)), 30)
     except ValueError:
         return JsonResponse({'error': 'Invalid minutes value'}, status=400)
 
-    if not premium_active:
+    if not profile.is_premium:
         if profile.audio_minutes_used + minutes > 10:
             return JsonResponse(
                 {'error': 'Free audio limit reached. Upgrade to premium.'},
@@ -280,7 +270,7 @@ def generate_audio(request):
             )
     audio_url = "https://example.com/audio/output.mp3"
 
-    if not premium_active:
+    if not profile.is_premium:
         profile.audio_minutes_used += minutes
         profile.save()
 
@@ -293,6 +283,3 @@ def reset_usage():
         audio_minutes_used=0,
         image_actions=0
     )
-
-# Added the following line as suggested for integrating react-paystack (npm dependency)
-# npm install react-paystack
