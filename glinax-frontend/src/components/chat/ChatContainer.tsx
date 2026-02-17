@@ -9,8 +9,8 @@ import { translations } from "@/lib/translations";
 import { Brain, FileText, Headphones, Sparkles } from "lucide-react";
 import { getChatMessages } from "@/lib/getChatMessages";
 import { nanoid } from "nanoid";
-import Cookies from "js-cookie";
 import api from "@/lib/api";
+import Cookies from "js-cookie";
 
 
 // Calculate Easter date using Computus algorithm (Anonymous Gregorian algorithm)
@@ -138,66 +138,13 @@ export function ChatContainer() {
     const sessions = useDataStore((state) => state.sessions);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
     const chatId = useDataStore((state) => state.chatId);
-    const setSessionMessages = useDataStore((state) => state.setSessionMessages);
+    const aiSettings = useDataStore((state) => state.aiSettings);
+    const addMessage = useDataStore((state) => state.addMessage);
     const t = translations[language];
     const isLoading = useUIStore((state) => state.isLoading);
-    const setIsLoading = useUIStore((state) => state.setIsLoading);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
+    const setIsLoading = useUIStore((state) => state.setIsLoading);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const aiSettings = useDataStore((state) => state.aiSettings);
-    const previousSessionIdRef = useRef<string | null>(null);
-    const inFlightChatIdRef = useRef<number | null>(null);
-
-    const handleRegenerate = async (messageId: string) => {
-        const state = useDataStore.getState();
-        const currentMessages = state.messages;
-        const targetIndex = currentMessages.findIndex((m) => m.id === messageId);
-        if (targetIndex === -1) return;
-
-        let prompt: string | null = null;
-        for (let i = targetIndex - 1; i >= 0; i -= 1) {
-            if (currentMessages[i].role === "user") {
-                prompt = currentMessages[i].content;
-                break;
-            }
-        }
-
-        if (!prompt) return;
-
-        setIsLoading(true);
-        useDataStore.setState((prev) => ({
-            messages: prev.messages.map((m) =>
-                m.id === messageId ? { ...m, content: "Regenerating...", createdAt: new Date() } : m
-            ),
-        }));
-
-        try {
-            const guestId = Cookies.get("guest_id");
-            const res = await api.post("/chat/", {
-                prompt,
-                guest_id: guestId,
-                chat_id: state.chatId,
-                response_style: aiSettings.responseStyle,
-            });
-
-            useDataStore.setState((prev) => ({
-                messages: prev.messages.map((m) =>
-                    m.id === messageId ? { ...m, content: res.data.response, createdAt: new Date() } : m
-                ),
-            }));
-        } catch (error) {
-            console.error("Regenerate failed:", error);
-            useDataStore.setState((prev) => ({
-                messages: prev.messages.map((m) =>
-                    m.id === messageId
-                        ? { ...m, content: "Sorry, I couldn't regenerate that response. Please try again." }
-                        : m
-                ),
-            }));
-        } finally {
-            setIsLoading(false);
-        }
-    };
 
     // Dynamic greeting state
     const [greeting, setGreeting] = useState("");
@@ -219,103 +166,48 @@ export function ChatContainer() {
 
     // Load messages when a session is selected
     useEffect(() => {
-        const prevSessionId = previousSessionIdRef.current;
-        if (prevSessionId && prevSessionId !== activeSessionId) {
-            setSessionMessages(prevSessionId, messages);
-        }
-        previousSessionIdRef.current = activeSessionId;
-    }, [activeSessionId, messages, setSessionMessages]);
-
-    // Keep active session cache hot so local new messages aren't lost on reload effects
-    useEffect(() => {
-        if (!activeSessionId) return;
-        setSessionMessages(activeSessionId, messages);
-    }, [activeSessionId, messages, setSessionMessages]);
-
-    useEffect(() => {
         const loadSessionMessages = async () => {
-            if (!activeSessionId) {
+            if (activeSessionId && chatId) {
+                // Find the session to get its chat_id
+                const session = sessions.find((s: { id: string }) => s.id === activeSessionId);
+                if (session) {
+                    const { error, data } = await getChatMessages(Number(chatId));
+                    if (!error && data.length > 0) {
+                        // Convert backend messages to frontend format
+                        const loadedMessages = data.map(msg => [
+                            {
+                                id: nanoid(),
+                                role: 'user' as const,
+                                content: msg.prompt,
+                                timestamp: new Date(msg.created_at),
+                            },
+                            {
+                                id: nanoid(),
+                                role: 'assistant' as const,
+                                content: msg.response,
+                                timestamp: new Date(msg.created_at),
+                            }
+                        ]).flat();
+
+                        // Clear and replace messages
+                        useDataStore.getState().clearMessages();
+                        loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
+                    }
+                }
+            } else if (!activeSessionId) {
                 // Clear messages when no session is selected
                 useDataStore.getState().clearMessages();
-                return;
             }
-
-            const session = sessions.find((s: { id: string }) => s.id === activeSessionId);
-            if (!session) {
-                useDataStore.getState().clearMessages();
-                return;
-            }
-
-            const sessionChatId = session.chatId ?? null;
-            if (sessionChatId !== chatId) {
-                useDataStore.getState().setChatId(sessionChatId);
-            }
-
-            const allSessionMessages = useDataStore.getState().sessionMessages;
-            const hasCached = Object.prototype.hasOwnProperty.call(allSessionMessages, activeSessionId);
-            if (hasCached) {
-                const cachedMessages = allSessionMessages[activeSessionId];
-                useDataStore.setState({ messages: cachedMessages });
-                return;
-            }
-
-            useDataStore.getState().clearMessages();
-
-            if (!sessionChatId) return;
-
-            if (inFlightChatIdRef.current === sessionChatId) return;
-
-            inFlightChatIdRef.current = sessionChatId;
-            const { error, data } = await getChatMessages(Number(sessionChatId));
-            inFlightChatIdRef.current = null;
-            if (error) return;
-
-            // Convert backend messages to frontend format
-            const loadedMessages = data.flatMap(msg => {
-                const items: {
-                    id: string;
-                    role: 'user' | 'assistant';
-                    content: string;
-                    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
-                    metadata?: Record<string, unknown>;
-                    createdAt: Date;
-                }[] = [];
-
-                if (msg.prompt && msg.prompt.trim().length > 0) {
-                    items.push({
-                        id: nanoid(),
-                        role: 'user',
-                        content: msg.prompt,
-                        type: (msg.prompt_type as any) || 'text',
-                        metadata: msg.prompt_metadata || undefined,
-                        createdAt: new Date(msg.created_at),
-                    });
-                }
-
-                items.push({
-                    id: nanoid(),
-                    role: 'assistant',
-                    content: msg.response,
-                    type: (msg.response_type as any) || 'text',
-                    metadata: msg.response_metadata || undefined,
-                    createdAt: new Date(msg.created_at),
-                });
-
-                return items;
-            });
-
-            useDataStore.setState({ messages: loadedMessages });
-            setSessionMessages(activeSessionId, loadedMessages);
         };
 
         loadSessionMessages();
-    }, [activeSessionId, chatId, sessions, setSessionMessages]);
+    }, [activeSessionId, chatId, sessions]);
 
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages, isLoading]);
+    }, [messages]);
 
     // Handle quick suggestion click
     const handleSuggestionClick = (index: number) => {
@@ -324,6 +216,62 @@ export function ChatContainer() {
             case 1: setActiveModal('summarize'); break;
             case 2: setActiveModal('tts'); break;
             default: break;
+        }
+    };
+
+    // Regenerate last AI response
+    const handleRegenerate = async () => {
+        const currentMessages = useDataStore.getState().messages;
+        
+        // Find the last user message
+        const lastUserIndex = currentMessages.findLastIndex(m => m.role === 'user');
+        if (lastUserIndex === -1) return;
+        
+        const lastUserMessage = currentMessages[lastUserIndex];
+        
+        // Remove the last AI response if it exists
+        const messagesWithoutLastAI = currentMessages.slice(0, lastUserIndex + 1);
+        
+        // Clear messages and add up to the last user message
+        useDataStore.getState().clearMessages();
+        messagesWithoutLastAI.forEach(msg => useDataStore.getState().addMessage(msg));
+        
+        // Call the API to get a new response
+        const guestId = Cookies.get("guest_id");
+        const currentChatId = useDataStore.getState().chatId;
+        
+        setIsLoading(true);
+        
+        try {
+            const res = await api.post("/chat/", {
+                prompt: lastUserMessage.content,
+                guest_id: guestId,
+                chat_id: currentChatId,
+                response_style: aiSettings.responseStyle,
+            });
+
+            // Store the chat_id from response if not already set
+            if (res.data.chat_id && !currentChatId) {
+                useDataStore.getState().setChatId(res.data.chat_id);
+            }
+
+            // Add new AI response
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: res.data.response,
+                timestamp: new Date(),
+            });
+        } catch (error) {
+            console.error("Regeneration failed:", error);
+            addMessage({
+                id: nanoid(),
+                role: 'assistant',
+                content: "Sorry, I couldn't regenerate the response. Please try again.",
+                timestamp: new Date(),
+            });
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -386,33 +334,17 @@ export function ChatContainer() {
                                 key={message.id}
                                 role={message.role}
                                 content={message.content}
-                                createdAt={message.createdAt}
+                                timestamp={message.timestamp}
                                 type={message.type}
                                 metadata={message.metadata}
-                                onRegenerate={message.role === "assistant" ? () => handleRegenerate(message.id) : undefined}
+                                onRegenerate={message.role === 'assistant' ? handleRegenerate : undefined}
                             />
                         ))
                     )}
 
                     {isLoading && (
-                        <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                            <div className="flex items-center gap-2 mb-3">
-                                <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shadow-md">
-                                    <span className="text-sm font-bold text-primary">Q</span>
-                                </div>
-                                <span className="text-sm font-semibold text-foreground">QwikStudi</span>
-                            </div>
-
-                            <div className="pl-9">
-                                <div className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-card/60 backdrop-blur-sm px-4 py-3">
-                                    <div className="flex items-end gap-1">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce" />
-                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce [animation-delay:120ms]" />
-                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce [animation-delay:240ms]" />
-                                    </div>
-                                    <span className="text-sm text-muted-foreground">QwikStudi is thinking...</span>
-                                </div>
-                            </div>
+                        <div className="flex justify-start mb-6 animate-pulse">
+                            <div className="bg-muted w-12 h-8 rounded-2xl" />
                         </div>
                     )}
                 </div>
@@ -432,3 +364,4 @@ export function ChatContainer() {
         </div>
     );
 }
+
