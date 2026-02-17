@@ -59,6 +59,7 @@ function formatContentForDisplay(content: unknown): string {
 
 export function MessageBubble({ role, content, createdAt: _createdAt, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
     const isAssistant = role === 'assistant';
+    const isLoadingPlaceholder = Boolean(type === 'text' && metadata?.isLoading === true);
     const [copied, setCopied] = useState(false);
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [rating, setRating] = useState<'like' | 'dislike' | null>(null);
@@ -174,7 +175,14 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
             {/* AI Content - Plain text, no bubble */}
             <div className="pl-9">
                 {displayContent && (
-                    <p className="text-[15px] leading-relaxed text-foreground/90 whitespace-pre-wrap">
+                    <p
+                        className={cn(
+                            "text-[15px] leading-relaxed whitespace-pre-wrap",
+                            isLoadingPlaceholder
+                                ? "text-foreground/70 italic animate-pulse"
+                                : "text-foreground/90"
+                        )}
+                    >
                         {displayContent}
                     </p>
                 )}
@@ -221,7 +229,7 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
                 )}
 
                 {/* Action Buttons - Like, Dislike, Regenerate, Copy, TTS, Summarize, Quiz */}
-                {displayContent && (
+                {displayContent && !isLoadingPlaceholder && (
                     <div className="flex items-center justify-center gap-1 mt-4">
                         {/* Like Button */}
                         <button

@@ -47,6 +47,19 @@ export default function Home() {
     const loadChatHistory = useDataStore((state) => state.loadChatHistory);
     const { showToast } = useToast();
 
+    const addLoadingAssistantMessage = (content: string) => {
+        const id = nanoid();
+        addMessage({
+            id,
+            role: 'assistant',
+            content,
+            type: 'text',
+            metadata: { isLoading: true },
+            createdAt: new Date(),
+        });
+        return id;
+    };
+
     const requireAuthForFeature = () => {
         if (isLoggedIn) return true;
         showToast("Please log in or register to use this feature.", "error");
@@ -99,14 +112,7 @@ export default function Home() {
 
     const handleTTSGenerate = async (text: string, voice: string) => {
         if (!requireAuthForFeature()) return;
-        const loadingId = nanoid();
-        addMessage({
-            id: loadingId,
-            role: 'assistant',
-            content: "Generating your audio...",
-            type: 'text',
-            createdAt: new Date(),
-        });
+        const loadingId = addLoadingAssistantMessage("Converting your text into audio...");
 
         try {
             const resolvedChatId = await ensureChatId();
@@ -168,15 +174,7 @@ export default function Home() {
 
     const handleSTTProcess = async (audioFile: File, durationMs?: number) => {
         if (!requireAuthForFeature()) return;
-        const loadingId = nanoid();
-
-        addMessage({
-            id: loadingId,
-            role: 'assistant',
-            content: "Transcribing your recording...",
-            type: 'text',
-            createdAt: new Date(),
-        });
+        const loadingId = addLoadingAssistantMessage("Transcribing your recording and preparing notes...");
 
         try {
             const formData = new FormData();
@@ -236,16 +234,7 @@ export default function Home() {
         const sourceFile = config.file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
         if (!sourceFile) return;
         
-        const loadingId = nanoid();
-        
-        // Add loading message
-        addMessage({
-            id: loadingId,
-            role: 'assistant',
-            content: "Analyzing your study material and generating quiz questions...",
-            type: 'text',
-            createdAt: new Date(),
-        });
+        const loadingId = addLoadingAssistantMessage("Reviewing your material and drafting quiz questions...");
 
         try {
             const formData = new FormData();
@@ -302,16 +291,7 @@ export default function Home() {
         const sourceFile = file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
         if (!sourceFile) return;
         
-        const loadingId = nanoid();
-        
-        // Add loading message
-        addMessage({
-            id: loadingId,
-            role: 'assistant',
-            content: "Analyzing your document and creating a summary...",
-            type: 'text',
-            createdAt: new Date(),
-        });
+        const loadingId = addLoadingAssistantMessage("Reading your document and building a clear summary...");
 
         try {
             const formData = new FormData();
