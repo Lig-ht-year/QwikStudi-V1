@@ -2,6 +2,7 @@
 
 import React, { useEffect } from "react";
 import { nanoid } from "nanoid";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
 import { ChatContainer } from "@/components/chat/ChatContainer";
 import { TTSModal } from "@/components/modals/TTSModal";
@@ -29,6 +30,7 @@ interface SummaryOptions {
 }
 
 export default function Home() {
+    const router = useRouter();
     // Use atomic stores directly for proper reactivity
     const activeModal = useUIStore((state) => state.activeModal);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
@@ -44,6 +46,14 @@ export default function Home() {
     const updateSession = useDataStore((state) => state.updateSession);
     const loadChatHistory = useDataStore((state) => state.loadChatHistory);
     const { showToast } = useToast();
+
+    const requireAuthForFeature = () => {
+        if (isLoggedIn) return true;
+        showToast("Please log in or register to use this feature.", "error");
+        setActiveModal(null);
+        router.push("/login");
+        return false;
+    };
 
     const ensureChatId = async () => {
         if (!isLoggedIn) return null;
@@ -88,6 +98,7 @@ export default function Home() {
     }, [activeSessionId, sessions, setActiveSessionId, setChatId]);
 
     const handleTTSGenerate = async (text: string, voice: string) => {
+        if (!requireAuthForFeature()) return;
         const loadingId = nanoid();
         addMessage({
             id: loadingId,
@@ -156,6 +167,7 @@ export default function Home() {
     };
 
     const handleSTTProcess = async (audioFile: File, durationMs?: number) => {
+        if (!requireAuthForFeature()) return;
         const loadingId = nanoid();
 
         addMessage({
@@ -220,6 +232,7 @@ export default function Home() {
     };
 
     const handleQuizGenerate = async (config: QuizConfig, content?: string) => {
+        if (!requireAuthForFeature()) return;
         const sourceFile = config.file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
         if (!sourceFile) return;
         
@@ -285,6 +298,7 @@ export default function Home() {
     };
 
     const handleSummarize = async (file: File | null, options: SummaryOptions, content?: string) => {
+        if (!requireAuthForFeature()) return;
         const sourceFile = file || (content ? new File([content], "message.txt", { type: "text/plain" }) : null);
         if (!sourceFile) return;
         

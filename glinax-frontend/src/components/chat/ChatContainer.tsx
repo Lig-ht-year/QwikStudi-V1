@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useRef, useEffect, useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { useUIStore } from "@/stores/uiStore";
@@ -11,6 +12,7 @@ import { getChatMessages } from "@/lib/getChatMessages";
 import { nanoid } from "nanoid";
 import api from "@/lib/api";
 import Cookies from "js-cookie";
+import { useToast } from "@/components/Toast";
 
 
 // Calculate Easter date using Computus algorithm (Anonymous Gregorian algorithm)
@@ -130,12 +132,13 @@ const suggestions = [
 ];
 
 export function ChatContainer() {
+    const router = useRouter();
+    const { showToast } = useToast();
     // Use atomic stores directly for proper reactivity
     const messages = useDataStore((state) => state.messages);
     const username = useDataStore((state) => state.username);
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
     const language = useDataStore((state) => state.language);
-    const sessions = useDataStore((state) => state.sessions);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
     const chatId = useDataStore((state) => state.chatId);
     const aiSettings = useDataStore((state) => state.aiSettings);
@@ -150,6 +153,7 @@ export function ChatContainer() {
     const [greeting, setGreeting] = useState("");
     const [tagline, setTagline] = useState("");
     const [mounted, setMounted] = useState(false);
+    const [loadingElapsedMs, setLoadingElapsedMs] = useState(0);
 
     // Set greeting on mount (client-side only to avoid hydration mismatch)
     useEffect(() => {
@@ -166,33 +170,35 @@ export function ChatContainer() {
 
     // Load messages when a session is selected
     useEffect(() => {
+        if (isLoading) return;
+
+        let isMounted = true;
+
         const loadSessionMessages = async () => {
             if (activeSessionId && chatId) {
-                // Find the session to get its chat_id
-                const session = sessions.find((s: { id: string }) => s.id === activeSessionId);
-                if (session) {
-                    const { error, data } = await getChatMessages(Number(chatId));
-                    if (!error && data.length > 0) {
-                        // Convert backend messages to frontend format
-                        const loadedMessages = data.map(msg => [
-                            {
-                                id: nanoid(),
-                                role: 'user' as const,
-                                content: msg.prompt,
-                                createdAt: new Date(msg.created_at),
-                            },
-                            {
-                                id: nanoid(),
-                                role: 'assistant' as const,
-                                content: msg.response,
-                                createdAt: new Date(msg.created_at),
-                            }
-                        ]).flat();
+                const { error, data } = await getChatMessages(Number(chatId));
+                if (!isMounted) return;
 
-                        // Clear and replace messages
-                        useDataStore.getState().clearMessages();
-                        loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
-                    }
+                if (!error && data.length > 0) {
+                    // Convert backend messages to frontend format
+                    const loadedMessages = data.map(msg => [
+                        {
+                            id: nanoid(),
+                            role: 'user' as const,
+                            content: msg.prompt,
+                            createdAt: new Date(msg.created_at),
+                        },
+                        {
+                            id: nanoid(),
+                            role: 'assistant' as const,
+                            content: msg.response,
+                            createdAt: new Date(msg.created_at),
+                        }
+                    ]).flat();
+
+                    // Clear and replace messages
+                    useDataStore.getState().clearMessages();
+                    loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
                 }
             } else if (!activeSessionId) {
                 // Clear messages when no session is selected
@@ -201,16 +207,45 @@ export function ChatContainer() {
         };
 
         loadSessionMessages();
-    }, [activeSessionId, chatId, sessions]);
+
+        return () => {
+            isMounted = false;
+        };
+    }, [activeSessionId, chatId, isLoading]);
 
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages]);
+    }, [messages, isLoading]);
+
+    useEffect(() => {
+        if (!isLoading) {
+            setLoadingElapsedMs(0);
+            return;
+        }
+
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            setLoadingElapsedMs(Date.now() - startedAt);
+        }, 500);
+
+        return () => clearInterval(timer);
+    }, [isLoading]);
+
+    const loadingStatus = useMemo(() => {
+        if (loadingElapsedMs < 4000) return "QwikStudi is thinking";
+        if (loadingElapsedMs < 9000) return "Reviewing your question";
+        return "Crafting a clear response";
+    }, [loadingElapsedMs]);
 
     // Handle quick suggestion click
     const handleSuggestionClick = (index: number) => {
+        if (!isLoggedIn) {
+            showToast("Please log in or register to use this feature.", "error");
+            router.push("/login");
+            return;
+        }
         switch (index) {
             case 0: setActiveModal('quiz'); break;
             case 1: setActiveModal('summarize'); break;
@@ -337,14 +372,31 @@ export function ChatContainer() {
                                 createdAt={message.createdAt}
                                 type={message.type}
                                 metadata={message.metadata}
-                                onRegenerate={message.role === 'assistant' ? handleRegenerate : undefined}
+                                onRegenerate={message.role === 'assistant' && !isLoading ? handleRegenerate : undefined}
                             />
                         ))
                     )}
 
                     {isLoading && (
-                        <div className="flex justify-start mb-6 animate-pulse">
-                            <div className="bg-muted w-12 h-8 rounded-2xl" />
+                        <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300" aria-live="polite" aria-atomic="true">
+                            <div className="flex items-center gap-2 mb-3">
+                                <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shadow-md">
+                                    <span className="text-sm font-bold text-primary">Q</span>
+                                </div>
+                                <span className="text-sm font-semibold text-foreground">QwikStudi</span>
+                                <span className="text-xs text-muted-foreground/70">typing...</span>
+                            </div>
+
+                            <div className="pl-9">
+                                <div className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-card/50 px-4 py-3">
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-primary/80 animate-bounce" />
+                                        <span className="w-2 h-2 rounded-full bg-primary/70 animate-bounce [animation-delay:120ms]" />
+                                        <span className="w-2 h-2 rounded-full bg-primary/60 animate-bounce [animation-delay:240ms]" />
+                                    </div>
+                                    <span className="text-sm text-muted-foreground">{loadingStatus}</span>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>

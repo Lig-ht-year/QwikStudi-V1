@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { nanoid } from "nanoid";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
     X,
     PlusCircle,
@@ -30,6 +31,7 @@ import { commitChat } from "@/lib/CommitChat";
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 export function ChatInput() {
+    const router = useRouter();
     const [input, setInput] = useState("");
     const [files, setFiles] = useState<File[]>([]);
     const [showFeatures, setShowFeatures] = useState(false);
@@ -42,7 +44,7 @@ export function ChatInput() {
     const cameraInputRef = useRef<HTMLInputElement>(null);
     const recognitionRef = useRef<any>(null);
     const { showToast } = useToast();
-    const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
+    const isLoading = useUIStore((state) => state.isLoading);
 
     // Use atomic stores directly for proper reactivity
     const addMessage = useDataStore((state) => state.addMessage);
@@ -58,6 +60,7 @@ export function ChatInput() {
     const t = translations[language];
     const isLimitExceeded = useDataStore((state) => state.isLimitExceeded);
     const setIsLimitExceeded = useDataStore((state) => state.setIsLimitExceeded);
+    const isLoggedIn = useDataStore((state) => state.isLoggedIn);
 
     // Limit message state (kept local since it's transient)
     const [limitMessage, setLimitMessage] = useState("");
@@ -65,6 +68,7 @@ export function ChatInput() {
     // Speech to Text Implementation
     const [isRecording, setIsRecording] = useState(false);
     const hasInputContent = input.trim().length > 0 || files.length > 0;
+    const isBusy = isSending || isLoading;
 
     // Initialize guest_id on mount (use UUID format for Django compatibility)
     useEffect(() => {
@@ -91,6 +95,13 @@ export function ChatInput() {
             }
         };
     }, []);
+
+    useEffect(() => {
+        if (isBusy) {
+            setShowAttachMenu(false);
+            setShowFeatures(false);
+        }
+    }, [isBusy]);
 
     const toggleRecording = () => {
         if (isRecording) {
@@ -171,7 +182,7 @@ export function ChatInput() {
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (!input.trim() && files.length === 0) return;
-        if (isSending) return;
+        if (isBusy) return;
 
         const userMessage = input.trim();
         const guestId = Cookies.get("guest_id");
@@ -366,6 +377,17 @@ export function ChatInput() {
         }
     };
 
+    const openProtectedModal = (modal: 'quiz' | 'summarize' | 'tts' | 'stt') => {
+        if (!isLoggedIn) {
+            showToast("Please log in or register to use this feature.", "error");
+            setShowFeatures(false);
+            router.push("/login");
+            return;
+        }
+        setActiveModal(modal);
+        setShowFeatures(false);
+    };
+
     return (
         <div className="w-full pb-4">
             {/* Limit Exceeded Banner */}
@@ -475,11 +497,11 @@ export function ChatInput() {
                     <div className="relative md:hidden">
                         <button
                             onClick={() => setShowAttachMenu(!showAttachMenu)}
-                            disabled={isSending}
+                            disabled={isBusy}
                             aria-label="Attach files"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                isSending
+                                isBusy
                                     ? "text-muted-foreground/30 cursor-not-allowed"
                                     : "",
                                 showAttachMenu
@@ -546,11 +568,11 @@ export function ChatInput() {
                     {/* Desktop: Plus Button - Opens file picker directly */}
                     <button
                         onClick={() => fileInputRef.current?.click()}
-                        disabled={isSending}
+                        disabled={isBusy}
                         aria-label="Attach files"
                         className={cn(
                             "hidden md:block p-2.5 rounded-full transition-all duration-200",
-                            isSending
+                            isBusy
                                 ? "text-muted-foreground/30 cursor-not-allowed"
                                 : "text-muted-foreground hover:text-foreground hover:bg-white/5"
                         )}
@@ -561,10 +583,10 @@ export function ChatInput() {
                     {/* Tools Button - Desktop only */}
                     <button
                         onClick={() => setShowFeatures(!showFeatures)}
-                        disabled={isSending}
+                        disabled={isBusy}
                         className={cn(
                             "hidden md:flex items-center gap-1.5 px-3 py-2 rounded-full transition-all",
-                            isSending
+                            isBusy
                                 ? "text-muted-foreground/30 cursor-not-allowed"
                                 : "",
                             showFeatures
@@ -587,8 +609,8 @@ export function ChatInput() {
                         value={input}
                         onChange={handleInput}
                         onKeyDown={handleKeyDown}
-                        placeholder={isSending ? "QwikStudi is responding..." : "Message QwikStudi..."}
-                        disabled={isSending}
+                        placeholder={isBusy ? "QwikStudi is responding..." : (t.messagePlaceholder || "Message QwikStudi...")}
+                        disabled={isBusy}
                         className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-sm max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
                     />
 
@@ -597,10 +619,10 @@ export function ChatInput() {
                         {/* Mic Button - Visible on all screens */}
                         <button
                             onClick={toggleRecording}
-                            disabled={isSending}
+                            disabled={isBusy}
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                isSending
+                                isBusy
                                     ? "text-muted-foreground/30 cursor-not-allowed"
                                     : "",
                                 isRecording
@@ -618,16 +640,16 @@ export function ChatInput() {
                         {/* Send Button */}
                         <button
                             onClick={handleSubmit}
-                            disabled={!hasInputContent || isSending}
+                            disabled={!hasInputContent || isBusy}
                             aria-label="Send message"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                hasInputContent && !isSending
+                                hasInputContent && !isBusy
                                     ? "text-primary hover:bg-primary/10"
                                     : "text-muted-foreground/30 cursor-not-allowed"
                             )}
                         >
-                            {isSending ? (
+                            {isBusy ? (
                                 <Loader2 className="w-5 h-5 animate-spin" />
                             ) : (
                                 <ArrowUp className="w-5 h-5" />
@@ -641,7 +663,7 @@ export function ChatInput() {
                     <div className="absolute bottom-full left-2 right-2 md:left-4 md:right-auto mb-3 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 md:p-2 md:min-w-[240px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
                         {/* Quiz Tool */}
                         <button
-                            onClick={() => { setActiveModal('quiz'); setShowFeatures(false); }}
+                            onClick={() => openProtectedModal('quiz')}
                             className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
                         >
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center shadow-sm">
@@ -655,7 +677,7 @@ export function ChatInput() {
 
                         {/* Summarize Tool */}
                         <button
-                            onClick={() => { setActiveModal('summarize'); setShowFeatures(false); }}
+                            onClick={() => openProtectedModal('summarize')}
                             className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
                         >
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center shadow-sm">
@@ -669,7 +691,7 @@ export function ChatInput() {
 
                         {/* Text-to-Speech Tool */}
                         <button
-                            onClick={() => { setActiveModal('tts'); setShowFeatures(false); }}
+                            onClick={() => openProtectedModal('tts')}
                             className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
                         >
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-400 to-violet-600 flex items-center justify-center shadow-sm">
@@ -683,7 +705,7 @@ export function ChatInput() {
 
                         {/* Speech-to-Text Tool */}
                         <button
-                            onClick={() => { setActiveModal('stt'); setShowFeatures(false); }}
+                            onClick={() => openProtectedModal('stt')}
                             className="w-full flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-white/5 text-left transition-colors group"
                         >
                             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-400 to-sky-600 flex items-center justify-center shadow-sm">
