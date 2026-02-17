@@ -153,6 +153,7 @@ export function ChatContainer() {
     const messages = useDataStore((state) => state.messages);
     const username = useDataStore((state) => state.username);
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
+    const hasHydrated = useDataStore((state) => state.hasHydrated);
     const language = useDataStore((state) => state.language);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
     const chatId = useDataStore((state) => state.chatId);
@@ -179,9 +180,10 @@ export function ChatContainer() {
 
     // Get display name
     const displayName = useMemo(() => {
+        if (!hasHydrated) return "";
         if (!isLoggedIn) return t.guest || "Guest";
         return formatDisplayName(username, t.guest || "Guest");
-    }, [isLoggedIn, username, t.guest]);
+    }, [hasHydrated, isLoggedIn, username, t.guest]);
 
     // Load messages when a session is selected
     useEffect(() => {
@@ -362,7 +364,7 @@ export function ChatContainer() {
                                 <h2 className="text-3xl md:text-5xl font-bold tracking-tight">
                                     {mounted ? greeting : t.greeting_generic || "Hi, there"},{" "}
                                     <span className="bg-gradient-to-r from-primary via-primary/80 to-primary bg-clip-text text-transparent">
-                                        {displayName}
+                                        {displayName || "\u00A0"}
                                     </span>
                                 </h2>
                                 <p className="text-lg md:text-xl text-muted-foreground max-w-lg mx-auto">

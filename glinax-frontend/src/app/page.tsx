@@ -130,6 +130,7 @@ export default function Home() {
                 content: `I've generated audio for your text using the ${voice} voice. Click play to listen.`,
                 type: 'audio',
                 metadata: {
+                    tts_id: res.data?.id,
                     title: "Generated Audio",
                     audio_url: res.data?.audio_url,
                     voice,

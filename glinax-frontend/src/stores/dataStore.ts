@@ -44,6 +44,9 @@ interface SelectedContent {
 }
 
 interface DataState {
+    hasHydrated: boolean;
+    setHasHydrated: (hydrated: boolean) => void;
+
     // Authentication
     isLoggedIn: boolean;
     login: (username: string) => void;
@@ -86,7 +89,7 @@ interface DataState {
     setChatId: (id: number | null) => void;
 
     // User
-    username: string;
+    username: string | null;
     setUsername: (name: string) => void;
     profilePicture: string | null;
     setProfilePicture: (picture: string | null) => void;
@@ -126,6 +129,9 @@ const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
 export const useDataStore = create<DataState>()(
     persist(
         (set, get) => ({
+            hasHydrated: false,
+            setHasHydrated: (hasHydrated) => set({ hasHydrated }),
+
             // Authentication
             isLoggedIn: false,
             login: (username) => set((state) => {
@@ -168,7 +174,7 @@ export const useDataStore = create<DataState>()(
                     localStorage.removeItem("refresh");
                     set({
                         isLoggedIn: false,
-                        username: '',
+                        username: null,
                         profilePicture: null,
                         sessions: [],
                         activeSessionId: null,
@@ -179,10 +185,24 @@ export const useDataStore = create<DataState>()(
                     });
                     return;
                 }
-                set((state) => (state.isLoggedIn ? state : { isLoggedIn: true }));
+                // Restore username from persisted state if available
+                const storedState = localStorage.getItem('qwikstudi-data');
+                let storedUsername: string | null = null;
+                try {
+                    if (storedState) {
+                        const parsed = JSON.parse(storedState);
+                        storedUsername = parsed.state?.username || null;
+                    }
+                } catch {
+                    // ignore parse errors
+                }
+                set((state) => ({
+                    isLoggedIn: true,
+                    username: storedUsername ?? state.username,
+                }));
             },
             setAuthUser: (user) => set((state) => {
-                const nextUsername = user?.username ?? '';
+                const nextUsername = user?.username ?? null;
                 const shouldReset = !state.isLoggedIn || state.username !== nextUsername;
                 return {
                     isLoggedIn: true,
@@ -294,8 +314,11 @@ export const useDataStore = create<DataState>()(
             })),
             clearSessionMessages: (sessionId) => set((state) => {
                 if (!state.sessionMessages[sessionId]) return state;
-                const { [sessionId]: _, ...rest } = state.sessionMessages;
-                return { sessionMessages: rest };
+                return {
+                    sessionMessages: Object.fromEntries(
+                        Object.entries(state.sessionMessages).filter(([id]) => id !== sessionId)
+                    ),
+                };
             }),
 
             // Active Chat ID (backend persistence)
@@ -303,7 +326,7 @@ export const useDataStore = create<DataState>()(
             setChatId: (chatId) => set({ chatId }),
 
             // User
-            username: '',
+            username: null,
             setUsername: (username) => set({ username }),
             profilePicture: null,
             setProfilePicture: (profilePicture) => set({ profilePicture }),
@@ -360,6 +383,7 @@ export const useDataStore = create<DataState>()(
             name: 'qwikstudi-data',
             onRehydrateStorage: () => (state) => {
                 state?.syncAuthFromStorage?.();
+                state?.setHasHydrated?.(true);
             },
             partialize: (state) => ({
                 isLoggedIn: state.isLoggedIn,

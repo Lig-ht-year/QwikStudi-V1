@@ -230,3 +230,4 @@ models.txt
 .cursorignore
 
 !glinax-frontend/src/lib/
+TODO_GUEST_FLASH_FIX.md

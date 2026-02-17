@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import RetrieveAPIView
+from django.http import FileResponse
 
 from openai import OpenAI
 
@@ -764,6 +765,7 @@ class TextToAudioView(APIView):
                     prompt_type="text",
                     response_type="audio",
                     response_metadata={
+                        "tts_id": tts_obj.id,
                         "title": "Generated Audio",
                         "audio_url": audio_url,
                         "voice": voice,
@@ -780,6 +782,25 @@ class TextToAudioView(APIView):
         except Exception as e:
             logger.error(f"Text-to-speech failed: {str(e)}")
             return Response({"error": "Text-to-speech conversion failed"}, status=500)
+
+
+class AudioFileByIdView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, tts_id: int):
+        tts_obj = TextToSpeech.objects.filter(id=tts_id).first()
+        if not tts_obj or not tts_obj.audio_file:
+            return Response({"error": "Audio file not found."}, status=404)
+
+        try:
+            audio_stream = tts_obj.audio_file.open("rb")
+        except FileNotFoundError:
+            return Response({"error": "Audio file not found."}, status=404)
+        except Exception:
+            return Response({"error": "Failed to open audio file."}, status=500)
+
+        filename = tts_obj.audio_file.name.rsplit("/", 1)[-1] or f"{tts_id}.mp3"
+        return FileResponse(audio_stream, content_type="audio/mpeg", as_attachment=False, filename=filename)
 
 
 import io

@@ -25,8 +25,45 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     const [progress, setProgress] = useState(0);
     const [currentTime, setCurrentTime] = useState(0);
     const [showTranscript, setShowTranscript] = useState(false);
+    const [audioSrc, setAudioSrc] = useState<string | undefined>(audioUrl);
+    const [candidateIndex, setCandidateIndex] = useState(0);
     const audioRef = React.useRef<HTMLAudioElement | null>(null);
     const progressRef = React.useRef<HTMLDivElement | null>(null);
+
+    const buildAudioCandidates = React.useCallback((rawUrl?: string) => {
+        if (!rawUrl) return [] as string[];
+        const candidates = new Set<string>();
+        candidates.add(rawUrl);
+
+        // Legacy malformed path: /media/text_to_speech/text_to_speech/<id>.mp3
+        const deduped = rawUrl.replace("/media/text_to_speech/text_to_speech/", "/media/text_to_speech/");
+        candidates.add(deduped);
+
+        // Legacy alternate path variant
+        if (rawUrl.includes("/media/text_to_speech/") && !rawUrl.includes("/media/text_to_speech/text_to_speech/")) {
+            candidates.add(rawUrl.replace("/media/text_to_speech/", "/media/text_to_speech/text_to_speech/"));
+        }
+
+        const idMatch = rawUrl.match(/\/(\d+)\.mp3(?:\?|$)/);
+        if (idMatch) {
+            const id = idMatch[1];
+            try {
+                const base = new URL(rawUrl, typeof window !== "undefined" ? window.location.origin : undefined);
+                candidates.add(`${base.origin}/api/chat/audio/${id}/`);
+            } catch {
+                // ignore malformed URLs
+            }
+        }
+
+        return Array.from(candidates);
+    }, []);
+
+    const candidates = React.useMemo(() => buildAudioCandidates(audioUrl), [audioUrl, buildAudioCandidates]);
+
+    React.useEffect(() => {
+        setCandidateIndex(0);
+        setAudioSrc(candidates[0]);
+    }, [candidates]);
 
     const toggleSpeed = () => {
         const next = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
@@ -61,6 +98,16 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     const handleEnded = () => {
         setIsPlaying(false);
         setProgress(100);
+    };
+
+    const handleAudioError = () => {
+        if (candidateIndex >= candidates.length - 1) {
+            setIsPlaying(false);
+            return;
+        }
+        const nextIndex = candidateIndex + 1;
+        setCandidateIndex(nextIndex);
+        setAudioSrc(candidates[nextIndex]);
     };
 
     const handleSeek = (clientX: number) => {
@@ -102,13 +149,14 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
 
     return (
         <div className="w-full max-w-sm bg-card border border-border/50 rounded-2xl shadow-xl overflow-hidden animate-in fade-in zoom-in duration-300">
-            {audioUrl && (
+            {audioSrc && (
                 <audio
                     ref={audioRef}
-                    src={audioUrl}
+                    src={audioSrc}
                     preload="metadata"
                     onTimeUpdate={handleTimeUpdate}
                     onEnded={handleEnded}
+                    onError={handleAudioError}
                 />
             )}
             <div className="p-4 flex flex-col gap-4">
@@ -137,7 +185,7 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                         onKeyDown={handleProgressKey}
                         className={cn(
                             "h-1.5 w-full bg-muted rounded-full overflow-hidden cursor-pointer group",
-                            !audioUrl && "opacity-50 cursor-not-allowed"
+                            !audioSrc && "opacity-50 cursor-not-allowed"
                         )}
                     >
                         <div
@@ -158,21 +206,21 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                     <div className="flex items-center gap-1">
                         <button
                             onClick={handleRewind}
-                            disabled={!audioUrl}
+                            disabled={!audioSrc}
                             className="p-2 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
                         >
                             <RotateCcw className="w-4 h-4" />
                         </button>
                         <button
                             onClick={togglePlay}
-                            disabled={!audioUrl}
+                            disabled={!audioSrc}
                             className="w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 disabled:opacity-50"
                         >
                             {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 ml-0.5 fill-current" />}
                         </button>
                         <button
                             onClick={handleForward}
-                            disabled={!audioUrl}
+                            disabled={!audioSrc}
                             className="p-2 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
                         >
                             <FastForward className="w-4 h-4" />
