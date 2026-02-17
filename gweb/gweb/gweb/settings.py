@@ -32,9 +32,31 @@ if not SECRET_KEY:
 SITE_DOMAIN = os.getenv("SITE_DOMAIN", "localhost:3000")
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = [host.strip().split(':')[0] for host in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host.strip()]
+def _normalize_host(value: str) -> str:
+    host = value.strip()
+    if not host:
+        return ""
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0]
+    host = host.split(":", 1)[0]
+    return host.strip()
+
+
+allowed_hosts_env = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1")
+ALLOWED_HOSTS = []
+for raw_host in allowed_hosts_env.split(","):
+    host = _normalize_host(raw_host)
+    if host and host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
+
+# Render sets this automatically for the deployed web service.
+render_host = _normalize_host(os.getenv("RENDER_EXTERNAL_HOSTNAME", ""))
+if render_host and render_host not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(render_host)
+
 if not DEBUG:
-    ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS if host.strip() != '*']
+    ALLOWED_HOSTS = [host for host in ALLOWED_HOSTS if host != "*"]
 
 PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY', '')
 PAYSTACK_PUBLIC_KEY = os.getenv('PAYSTACK_PUBLIC_KEY', '')
@@ -248,4 +270,3 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-
