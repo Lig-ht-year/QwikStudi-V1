@@ -71,7 +71,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const setActiveSessionId = useDataStore((state) => state.setActiveSessionId);
     const setChatId = useDataStore((state) => state.setChatId);
     const deleteSession = useDataStore((state) => state.deleteSession);
-    const createSession = useDataStore((state) => state.createSession);
+    const startDraftSession = useDataStore((state) => state.startDraftSession);
     const username = useDataStore((state) => state.username);
     const profilePicture = useDataStore((state) => state.profilePicture);
     const plan = useDataStore((state) => state.plan);
@@ -85,7 +85,11 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const [searchQuery, setSearchQuery] = useState("");
 
     // Filter sessions based on search query
-    const filteredSessions = sessions.filter((session) =>
+    const visibleSessions = isLoggedIn
+        ? sessions.filter((session) => session.chatId !== null)
+        : sessions;
+
+    const filteredSessions = visibleSessions.filter((session) =>
         session.title.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
@@ -151,7 +155,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
             {isLoggedIn && (
                 <div className="px-4 shrink-0">
                     <button
-                        onClick={() => createSession("New Study Session")}
+                        onClick={startDraftSession}
                         className={cn(
                             "w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 transition-all hover:scale-[1.02] hover:shadow-primary/30 group mb-3",
                             !isSidebarOpen && "px-3"

@@ -69,6 +69,7 @@ interface DataState {
     // Sessions
     sessions: ChatSession[];
     activeSessionId: string | null;
+    startDraftSession: () => void;
     setActiveSessionId: (id: string | null) => void;
     createSession: (title: string, options?: { chatId?: number | null; resetMessages?: boolean; setActive?: boolean; }) => void;
     deleteSession: (id: string) => void;
@@ -222,6 +223,11 @@ export const useDataStore = create<DataState>()(
             // Sessions
             sessions: [],
             activeSessionId: null,
+            startDraftSession: () => set({
+                activeSessionId: null,
+                chatId: null,
+                messages: [],
+            }),
             setActiveSessionId: (activeSessionId) => set({ activeSessionId }),
             createSession: (title, options) => set((state) => {
                 const { chatId = null, resetMessages = true, setActive = true } = options || {};

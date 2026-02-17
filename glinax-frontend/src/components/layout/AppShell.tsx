@@ -2,7 +2,7 @@
 
 import React, { useEffect } from "react";
 import { Sidebar } from "./Sidebar";
-import { AlignLeft, X, Plus, User } from "lucide-react";
+import { AlignLeft, Plus, User } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
@@ -19,7 +19,7 @@ export function AppShell({ children }: AppShellProps) {
     // Use atomic stores directly for proper reactivity
     const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
     const setIsSidebarOpen = useUIStore((state) => state.setIsSidebarOpen);
-    const createSession = useDataStore((state) => state.createSession);
+    const startDraftSession = useDataStore((state) => state.startDraftSession);
     const profilePicture = useDataStore((state) => state.profilePicture);
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
     const syncAuthFromStorage = useDataStore((state) => state.syncAuthFromStorage);
@@ -123,7 +123,7 @@ export function AppShell({ children }: AppShellProps) {
                         <div className="flex items-center gap-1 px-2 py-1.5 rounded-full border border-white/10 bg-white/5 backdrop-blur-md">
                             <button
                                 className="p-2 rounded-full hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
-                                onClick={() => createSession("New Study Session")}
+                                onClick={startDraftSession}
                             >
                                 <Plus className="w-5 h-5" />
                             </button>

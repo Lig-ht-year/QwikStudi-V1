@@ -196,24 +196,7 @@ export function ChatInput() {
             createdAt: now,
         });
 
-        const state = useDataStore.getState();
-        const currentSessionId = state.activeSessionId;
-        const currentSession = currentSessionId
-            ? state.sessions.find((session) => session.id === currentSessionId)
-            : null;
-        const defaultTitle = currentSession?.title === "New Study Session" || currentSession?.title === "New Chat";
         const trimmedTitle = userMessage.length > 60 ? `${userMessage.slice(0, 60)}...` : userMessage;
-
-        if (currentSessionId && (defaultTitle || !currentSession?.title)) {
-            updateSession(currentSessionId, {
-                title: trimmedTitle,
-                lastMessageAt: now,
-            });
-        } else if (currentSessionId) {
-            updateSession(currentSessionId, { lastMessageAt: now });
-        } else {
-            createSession(trimmedTitle, { chatId: null, resetMessages: false });
-        }
 
         setInput("");
         setFiles([]);
@@ -248,21 +231,6 @@ export function ChatInput() {
                 return;
             }
 
-            // Store the chat_id from response for future messages
-            if (res.data.chat_id && !chatId) {
-                setChatId(res.data.chat_id);
-                const latestState = useDataStore.getState();
-                const latestSessionId = latestState.activeSessionId;
-                if (latestSessionId) {
-                    updateSession(latestSessionId, {
-                        chatId: res.data.chat_id,
-                        lastMessageAt: new Date(),
-                    });
-                } else {
-                    createSession(trimmedTitle || "New Chat", { chatId: res.data.chat_id, resetMessages: false });
-                }
-            }
-
             // Add AI response
             addMessage({
                 id: nanoid(),
@@ -271,19 +239,46 @@ export function ChatInput() {
                 createdAt: new Date(),
             });
 
+            const responseChatId: number | null = typeof res.data.chat_id === "number" ? res.data.chat_id : null;
+            if (responseChatId) {
+                setChatId(responseChatId);
+            }
+
+            const latestState = useDataStore.getState();
+            const latestSessionId = latestState.activeSessionId;
+            const latestSession = latestSessionId
+                ? latestState.sessions.find((session) => session.id === latestSessionId)
+                : null;
+            const defaultTitle = latestSession?.title === "New Study Session" || latestSession?.title === "New Chat";
+
+            if (latestSessionId) {
+                updateSession(latestSessionId, {
+                    ...(defaultTitle || !latestSession?.title ? { title: trimmedTitle } : {}),
+                    ...(responseChatId && !latestSession?.chatId ? { chatId: responseChatId } : {}),
+                    lastMessageAt: new Date(),
+                });
+            } else {
+                createSession(trimmedTitle || "New Chat", {
+                    chatId: responseChatId,
+                    resetMessages: false,
+                    setActive: true,
+                });
+            }
+
             // Auto-generate title after 2+ message pairs (4 messages total)
             const messages = useDataStore.getState().messages;
-            if (chatId && messages.length >= 4) {
+            const commitChatId = responseChatId ?? useDataStore.getState().chatId;
+            if (commitChatId && messages.length >= 4) {
                 const recentMessages = messages.slice(-4).map(m => ({
                     prompt: m.role === 'user' ? m.content : '',
                     response: m.role === 'assistant' ? m.content : ''
                 })).filter(m => m.prompt || m.response);
                 
                 if (recentMessages.length >= 2) {
-                    commitChat(Number(chatId), recentMessages)
+                    commitChat(Number(commitChatId), recentMessages)
                         .then((result) => {
                             if (result?.title) {
-                                updateSessionByChatId(Number(chatId), {
+                                updateSessionByChatId(Number(commitChatId), {
                                     title: result.title,
                                     lastMessageAt: new Date(),
                                 });

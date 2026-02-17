@@ -234,7 +234,7 @@ export function ChatContainer() {
                     useDataStore.getState().clearMessages();
                     loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
                 }
-            } else if (!activeSessionId) {
+            } else if (!activeSessionId || (activeSessionId && !chatId)) {
                 // Clear messages when no session is selected
                 useDataStore.getState().clearMessages();
             }
