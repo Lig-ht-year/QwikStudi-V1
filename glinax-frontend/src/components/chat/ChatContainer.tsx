@@ -179,13 +179,13 @@ export function ChatContainer() {
                                 id: nanoid(),
                                 role: 'user' as const,
                                 content: msg.prompt,
-                                timestamp: new Date(msg.created_at),
+                                createdAt: new Date(msg.created_at),
                             },
                             {
                                 id: nanoid(),
                                 role: 'assistant' as const,
                                 content: msg.response,
-                                timestamp: new Date(msg.created_at),
+                                createdAt: new Date(msg.created_at),
                             }
                         ]).flat();
 
@@ -260,7 +260,7 @@ export function ChatContainer() {
                 id: nanoid(),
                 role: 'assistant',
                 content: res.data.response,
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
         } catch (error) {
             console.error("Regeneration failed:", error);
@@ -268,7 +268,7 @@ export function ChatContainer() {
                 id: nanoid(),
                 role: 'assistant',
                 content: "Sorry, I couldn't regenerate the response. Please try again.",
-                timestamp: new Date(),
+                createdAt: new Date(),
             });
         } finally {
             setIsLoading(false);
@@ -364,4 +364,3 @@ export function ChatContainer() {
         </div>
     );
 }
-

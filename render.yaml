@@ -31,14 +31,15 @@ services:
   - type: web
     name: glinax-frontend
     runtime: node
-    buildCommand: "cd gweb/glinax-frontend && npm ci && npm run build"
-    startCommand: "cd gweb/glinax-frontend && npm start"
+    rootDir: glinax-frontend
+    buildCommand: "npm ci && npm run build"
+    startCommand: "npm start"
+    healthCheckPath: /
     envVars:
       - key: NEXT_PUBLIC_API_URL
-        fromService:
-          name: glinax-backend
-          type: web
-          property: host
+        value: "https://qwikstudi-backend-ccuz.onrender.com/api"
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
 
 databases:
   - name: glinax-db
