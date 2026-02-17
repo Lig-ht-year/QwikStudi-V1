@@ -10,6 +10,8 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth.models import update_last_login
+from django.contrib.auth import authenticate
+from rest_framework import serializers as drf_serializers
 class CustomTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
@@ -34,6 +36,8 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    email = drf_serializers.EmailField(required=False, allow_blank=True)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -41,31 +45,43 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        username = attrs.get("username")
+        password = attrs.get("password")
+        email = attrs.get("email")
+
+        # Allow login by email
+        if email and not username:
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                raise drf_serializers.ValidationError("Invalid email or password.")
+            username = user.username
+            attrs["username"] = username
+        elif username and "@" in username:
+            user = User.objects.filter(email__iexact=username).first()
+            if user:
+                attrs["username"] = user.username
+
         data = super().validate(attrs)
 
-        # ✅ Set self.user so the view can access it
-        self.user = self.user  # Required
+        # Ensure self.user is set and update last_login
+        if hasattr(self, "user") and self.user:
+            update_last_login(None, self.user)
+            data["user"] = {
+                "id": self.user.id,
+                "username": self.user.username,
+                "email": self.user.email,
+            }
+        else:
+            # Fallback to authenticate if needed
+            user = authenticate(username=attrs.get("username"), password=password)
+            if not user:
+                raise drf_serializers.ValidationError("Invalid email or password.")
+            data["user"] = {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+            }
 
-        # ✅ Optionally update last_login
-        update_last_login(None, self.user)
-
-        # ✅ Add user info to response
-        data['user'] = {
-            'id': self.user.id,
-            'username': self.user.username,
-            'email': self.user.email
-        }
-
-        return data
-
-
-    def validate(self, attrs):
-        data = super().validate(attrs)
-        data['user'] = {
-            'id': self.user.id,
-            'username': self.user.username,
-            'email': self.user.email
-        }
         return data
 
 class RegisterSerializer(serializers.ModelSerializer):

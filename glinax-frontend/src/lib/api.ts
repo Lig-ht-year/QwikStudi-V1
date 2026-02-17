@@ -1,4 +1,5 @@
 import axios from "axios";
+import { useDataStore } from "@/stores/dataStore";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL,
@@ -9,6 +10,7 @@ const api = axios.create({
 
 // 🔐 Add Authorization header if access token exists
 api.interceptors.request.use((config) => {
+  if (typeof window === "undefined") return config;
   const access = localStorage.getItem("access");
   if (access) {
     config.headers = config.headers || {};
@@ -45,8 +47,7 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshErr) {
         // Refresh failed → force logout
-        localStorage.removeItem("access");
-        localStorage.removeItem("refresh");
+        useDataStore.getState().logout();
         window.location.href = "/login";
       }
     }

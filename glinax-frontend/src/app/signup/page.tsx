@@ -45,10 +45,19 @@ export default function SignupPage() {
         try {
             const normalizedEmail = email.trim().toLowerCase();
             const emailPrefix = normalizedEmail.split("@")[0] || "";
-            const username = emailPrefix
+            const nameSlug = name
+                .trim()
+                .toLowerCase()
+                .replace(/\s+/g, ".")
+                .replace(/[^a-z0-9._-]/g, "")
+                .replace(/\.+/g, ".")
+                .replace(/^\.|\.$/g, "")
+                .slice(0, 30);
+            const emailSlug = emailPrefix
                 .toLowerCase()
                 .replace(/[^a-z0-9._-]/g, "")
-                .slice(0, 30) || name.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 30);
+                .slice(0, 30);
+            const username = nameSlug || emailSlug;
 
             if (!username) {
                 setError("Please use an email with letters or numbers.");

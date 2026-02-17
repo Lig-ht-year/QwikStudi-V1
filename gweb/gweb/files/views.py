@@ -41,6 +41,7 @@ from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from chat.models import Chat, ChatHistory, ChatCollaborator
 import re
+from payments.models import UserProfile as PaymentsUserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,31 @@ def _build_notes_from_transcription(text):
     if len(sentences) <= 8:
         return sentences
     return sentences[:8]
+
+def _get_payments_profile(user):
+    profile, _ = PaymentsUserProfile.objects.get_or_create(user=user)
+    today = timezone.now().date()
+    if profile.is_premium and profile.premium_expiry and profile.premium_expiry < today:
+        profile.is_premium = False
+        profile.save(update_fields=["is_premium"])
+    return profile
+
+def _is_premium(profile):
+    today = timezone.now().date()
+    return bool(profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today)
+
+def _estimate_tts_minutes(text: str, speed: float | None = None) -> float:
+    words = len(re.findall(r"[A-Za-z0-9']+", text or ""))
+    wpm = 150.0
+    minutes = words / wpm if wpm else 0.0
+    if speed:
+        try:
+            speed_val = float(speed)
+            if speed_val > 0:
+                minutes = minutes / speed_val
+        except (TypeError, ValueError):
+            pass
+    return max(minutes, 0.01)
 
 class ScoreQuestionsAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -163,6 +189,8 @@ class GenerateAudioAPIView(APIView):
             client = get_openai_client()
             text_input = None
             user = request.user
+            profile = _get_payments_profile(user)
+            premium_active = _is_premium(profile)
 
             # Improved parsing logic 
             if "text" in request.data and request.data["text"].strip():
@@ -210,6 +238,13 @@ class GenerateAudioAPIView(APIView):
             if not text_input or not text_input.strip():
                 return Response({"error": "No valid text, file, or file_id provided."}, status=400)
 
+            estimated_minutes = _estimate_tts_minutes(text_input, request.data.get("speed"))
+            if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+                return Response(
+                    {"error": "Free audio limit reached. Upgrade to premium."},
+                    status=429
+                )
+
             response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice=request.data.get("voice", "verse"),
@@ -220,6 +255,10 @@ class GenerateAudioAPIView(APIView):
             audio_bytes = response.read() if hasattr(response, "read") else response.content
             audio_path = default_storage.save("tts_output.mp3", ContentFile(audio_bytes))
             audio_url = default_storage.url(audio_path)
+
+            if not premium_active:
+                profile.audio_minutes_used += estimated_minutes
+                profile.save(update_fields=["audio_minutes_used"])
 
             return Response({"audio_url": audio_url}, status=status.HTTP_200_OK)
 
@@ -245,6 +284,15 @@ class QuickGenerateAudioAPIView(APIView):
             if not text:
                 return JsonResponse({"error": "No text provided"}, status=400)
 
+            profile = _get_payments_profile(request.user)
+            premium_active = _is_premium(profile)
+            estimated_minutes = _estimate_tts_minutes(text)
+            if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+                return JsonResponse(
+                    {"error": "Free audio limit reached. Upgrade to premium."},
+                    status=429
+                )
+
             client = get_openai_client()
             response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
@@ -255,6 +303,10 @@ class QuickGenerateAudioAPIView(APIView):
                 audio_bytes = b"".join(response.iter_bytes())
             else:
                 audio_bytes = response.read()
+
+            if not premium_active:
+                profile.audio_minutes_used += estimated_minutes
+                profile.save(update_fields=["audio_minutes_used"])
 
             return HttpResponse(
                 audio_bytes,
@@ -304,6 +356,8 @@ class GenerateQuestionsAPIView(APIView):
     def post(self, request):
         try:
             user = request.user
+            profile = _get_payments_profile(user)
+            premium_active = _is_premium(profile)
             data = request.data
             source_type = data.get('source_type')
             source_id = data.get('source_id')
@@ -312,6 +366,7 @@ class GenerateQuestionsAPIView(APIView):
             mode = data.get('mode', 'both').lower()
             visuals = data.get('visuals', False)
             difficulty = data.get('difficulty', 'medium').lower()
+            requested_type = (data.get('question_type') or data.get('type') or "").lower()
 
             try:
                 num_questions = int(data.get('num_questions', 5))
@@ -321,6 +376,20 @@ class GenerateQuestionsAPIView(APIView):
             text = ""
             questions = []
             warning_msg = None
+
+            if not premium_active:
+                if requested_type in {"theory", "true_false", "fill_in"}:
+                    return Response({"error": "This question type requires a premium subscription."}, status=403)
+                if mode in {"theory", "true_false", "fill_in"}:
+                    return Response({"error": "This question type requires a premium subscription."}, status=403)
+                if mode == "both":
+                    mode = "mcq"
+                remaining = 20 - profile.questions_generated
+                if remaining <= 0 or num_questions > remaining:
+                    return Response(
+                        {"error": "You have reached your free question limit. Upgrade to premium to continue."},
+                        status=429
+                    )
 
             try:
                 if source_type == 'file':
@@ -406,6 +475,10 @@ class GenerateQuestionsAPIView(APIView):
             if warning_msg:
                 response_data["warning"] = warning_msg
 
+            if not premium_active:
+                profile.questions_generated += len(saved_questions)
+                profile.save(update_fields=["questions_generated"])
+
             return Response(response_data, status=201)
 
         except Exception as e:
@@ -430,6 +503,8 @@ class FileSummaryAPIView(APIView):
             return Response({"error": "Invalid format. Must be 'text' or 'file'."}, status=400)
         try:
             file_obj = File.objects.get(id=file_id, user=request.user)
+            profile = _get_payments_profile(request.user)
+            premium_active = _is_premium(profile)
             max_size = 10 * 1024 * 1024
             if file_obj.file.size > max_size:
                 return Response({"error": "File too large. Max 10MB."}, status=400)
@@ -438,6 +513,12 @@ class FileSummaryAPIView(APIView):
                 reader = PdfReader(file_obj.file.path)
                 if len(reader.pages) > 20:
                     return Response({"error": "PDF too long (max 20 pages)."}, status=400)
+            is_image_or_pdf = file_obj.file.name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"))
+            if is_image_or_pdf and not premium_active and profile.image_actions >= 3:
+                return Response(
+                    {"error": "Free image analysis limit reached. Upgrade to premium."},
+                    status=429
+                )
         except File.DoesNotExist:
             return Response({"error": "File not found."}, status=404)
         except Exception as e:
@@ -449,6 +530,9 @@ class FileSummaryAPIView(APIView):
                 {"error": "Failed to generate summary.", "warning": warning_msg},
                 status=500
             )
+        if is_image_or_pdf and not premium_active:
+            profile.image_actions += 1
+            profile.save(update_fields=["image_actions"])
         if format_choice == "file":
             summary = FileSummary.objects.create(
                 user=request.user,

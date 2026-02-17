@@ -146,7 +146,6 @@ export function ChatContainer() {
     const scrollRef = useRef<HTMLDivElement>(null);
     const aiSettings = useDataStore((state) => state.aiSettings);
     const previousSessionIdRef = useRef<string | null>(null);
-    const fetchedChatIdsRef = useRef<Set<number>>(new Set());
     const inFlightChatIdRef = useRef<number | null>(null);
 
     const handleRegenerate = async (messageId: string) => {
@@ -227,6 +226,12 @@ export function ChatContainer() {
         previousSessionIdRef.current = activeSessionId;
     }, [activeSessionId, messages, setSessionMessages]);
 
+    // Keep active session cache hot so local new messages aren't lost on reload effects
+    useEffect(() => {
+        if (!activeSessionId) return;
+        setSessionMessages(activeSessionId, messages);
+    }, [activeSessionId, messages, setSessionMessages]);
+
     useEffect(() => {
         const loadSessionMessages = async () => {
             if (!activeSessionId) {
@@ -251,14 +256,14 @@ export function ChatContainer() {
             if (hasCached) {
                 const cachedMessages = allSessionMessages[activeSessionId];
                 useDataStore.setState({ messages: cachedMessages });
-            } else {
-                useDataStore.getState().clearMessages();
+                return;
             }
+
+            useDataStore.getState().clearMessages();
 
             if (!sessionChatId) return;
 
             if (inFlightChatIdRef.current === sessionChatId) return;
-            if (hasCached && fetchedChatIdsRef.current.has(sessionChatId)) return;
 
             inFlightChatIdRef.current = sessionChatId;
             const { error, data } = await getChatMessages(Number(sessionChatId));
@@ -300,17 +305,17 @@ export function ChatContainer() {
             });
 
             useDataStore.setState({ messages: loadedMessages });
-            fetchedChatIdsRef.current.add(sessionChatId);
+            setSessionMessages(activeSessionId, loadedMessages);
         };
 
         loadSessionMessages();
-    }, [activeSessionId, chatId, sessions]);
+    }, [activeSessionId, chatId, sessions, setSessionMessages]);
 
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-    }, [messages]);
+    }, [messages, isLoading]);
 
     // Handle quick suggestion click
     const handleSuggestionClick = (index: number) => {
@@ -390,8 +395,24 @@ export function ChatContainer() {
                     )}
 
                     {isLoading && (
-                        <div className="flex justify-start mb-6 animate-pulse">
-                            <div className="bg-muted w-12 h-8 rounded-2xl" />
+                        <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                            <div className="flex items-center gap-2 mb-3">
+                                <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shadow-md">
+                                    <span className="text-sm font-bold text-primary">Q</span>
+                                </div>
+                                <span className="text-sm font-semibold text-foreground">QwikStudi</span>
+                            </div>
+
+                            <div className="pl-9">
+                                <div className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-card/60 backdrop-blur-sm px-4 py-3">
+                                    <div className="flex items-end gap-1">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce" />
+                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce [animation-delay:120ms]" />
+                                        <span className="w-1.5 h-1.5 rounded-full bg-primary/80 animate-bounce [animation-delay:240ms]" />
+                                    </div>
+                                    <span className="text-sm text-muted-foreground">QwikStudi is thinking...</span>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>

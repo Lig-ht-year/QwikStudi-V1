@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from django.utils import timezone
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -28,6 +29,8 @@ from.models import TextToSpeech
 from .utils import get_client_ip, generate_chat_title_from_openai, get_openai_client
 
 from g_auth.models import GuestChatTracker, GuestIPTracker
+from payments.models import UserProfile as PaymentsUserProfile
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,24 @@ def _get_chat_for_write(user, chat_id):
         chat=chat, collaborator=user, is_approved=True, access_level="edit"
     ).first()
     return chat if collaborator else None
+
+def _get_payments_profile(user):
+    profile, _ = PaymentsUserProfile.objects.get_or_create(user=user)
+    today = timezone.now().date()
+    if profile.is_premium and profile.premium_expiry and profile.premium_expiry < today:
+        profile.is_premium = False
+        profile.save(update_fields=["is_premium"])
+    return profile
+
+def _is_premium(profile):
+    today = timezone.now().date()
+    return bool(profile.is_premium and profile.premium_expiry and profile.premium_expiry >= today)
+
+def _estimate_tts_minutes(text: str) -> float:
+    words = len(re.findall(r"[A-Za-z0-9']+", text or ""))
+    wpm = 150.0
+    minutes = words / wpm if wpm else 0.0
+    return max(minutes, 0.01)
 
 class AddCollaboratorAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -698,6 +719,15 @@ class TextToAudioView(APIView):
                 {"error": f"Text too long. Maximum {MAX_TTS_LENGTH} characters allowed for text-to-speech."},
                 status=400
             )
+
+        profile = _get_payments_profile(request.user)
+        premium_active = _is_premium(profile)
+        estimated_minutes = _estimate_tts_minutes(text)
+        if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+            return Response(
+                {"error": "Free audio limit reached. Upgrade to premium."},
+                status=429
+            )
         
         try:
             # Generate speech using OpenAI TTS
@@ -718,6 +748,10 @@ class TextToAudioView(APIView):
             file_path = f"text_to_speech/{tts_obj.id}.mp3"
             tts_obj.audio_file.save(file_path, ContentFile(response.content))
             audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
+
+            if not premium_active:
+                profile.audio_minutes_used += estimated_minutes
+                profile.save(update_fields=["audio_minutes_used"])
 
             chat = _get_chat_for_write(request.user, chat_id)
             if chat:
@@ -816,10 +850,36 @@ class QuizGenerateAPIView(APIView):
     
     def post(self, request):
         # Get quiz configuration from request
-        question_type = request.data.get("questionType", "mcq")
-        question_count = int(request.data.get("questionCount", 10))
+        question_type = str(request.data.get("questionType", "mcq")).lower()
+        if question_type in {"true_false", "true/false"}:
+            question_type = "tf"
+        elif question_type in {"fill_in", "fill-in", "fillin"}:
+            question_type = "fill"
+        elif question_type in {"theory"}:
+            question_type = "essay"
+        try:
+            question_count = int(request.data.get("questionCount", 10))
+        except Exception:
+            question_count = 10
+        if question_count < 1:
+            question_count = 1
         difficulty = request.data.get("difficulty", "medium")
         chat_id = request.data.get("chat_id")
+
+        profile = _get_payments_profile(request.user)
+        premium_active = _is_premium(profile)
+        if not premium_active and question_type in {"tf", "fill", "essay"}:
+            return Response(
+                {"error": "This question type requires a premium subscription."},
+                status=403
+            )
+        if not premium_active:
+            remaining = 20 - profile.questions_generated
+            if remaining <= 0 or question_count > remaining:
+                return Response(
+                    {"error": "You have reached your free question limit. Upgrade to premium to continue."},
+                    status=429
+                )
         
         # Get uploaded file
         if 'file' not in request.FILES:
@@ -1024,6 +1084,10 @@ Only return valid JSON, nothing else.
                     },
                     context="quiz",
                 )
+            
+            if not premium_active:
+                profile.questions_generated += len(normalized_questions)
+                profile.save(update_fields=["questions_generated"])
             
             return Response({
                 "questions": normalized_questions,

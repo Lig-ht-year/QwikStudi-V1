@@ -31,14 +31,11 @@ export default function LoginPage() {
         setError("");
 
         try {
-            // Django auth expects username/password, not email/password
-            // Extract username from email (everything before @)
             const normalizedEmail = email.trim().toLowerCase();
-            const username = normalizedEmail.split('@')[0];
 
             // Call Django JWT authentication endpoint
             const res = await api.post("/auth/login/", {
-                username,
+                email: normalizedEmail,
                 password,
             });
 

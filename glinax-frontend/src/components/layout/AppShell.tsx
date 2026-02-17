@@ -9,6 +9,7 @@ import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import { KeyboardShortcuts } from "@/components/KeyboardShortcuts";
 import { checkPremiumStatus } from "@/lib/payment";
+import api from "@/lib/api";
 
 interface AppShellProps {
     children: React.ReactNode;
@@ -21,8 +22,31 @@ export function AppShell({ children }: AppShellProps) {
     const createSession = useDataStore((state) => state.createSession);
     const profilePicture = useDataStore((state) => state.profilePicture);
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
+    const syncAuthFromStorage = useDataStore((state) => state.syncAuthFromStorage);
+    const setAuthUser = useDataStore((state) => state.setAuthUser);
+    const logout = useDataStore((state) => state.logout);
     const setPlan = useDataStore((state) => state.setPlan);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
+
+    useEffect(() => {
+        syncAuthFromStorage();
+    }, [syncAuthFromStorage]);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const access = localStorage.getItem("access");
+        if (!access) return;
+        (async () => {
+            try {
+                const res = await api.get("/auth/me/");
+                if (res?.data?.username) {
+                    setAuthUser({ username: res.data.username });
+                }
+            } catch {
+                logout();
+            }
+        })();
+    }, [setAuthUser, logout]);
 
     useEffect(() => {
         if (!isLoggedIn) return;

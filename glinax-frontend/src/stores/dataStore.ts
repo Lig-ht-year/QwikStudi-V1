@@ -48,6 +48,8 @@ interface DataState {
     isLoggedIn: boolean;
     login: (username: string) => void;
     logout: () => void;
+    syncAuthFromStorage: () => void;
+    setAuthUser: (user: { username: string }) => void;
 
     // Messages
     messages: Message[];
@@ -141,6 +143,45 @@ export const useDataStore = create<DataState>()(
                     isLimitExceeded: false,
                 });
             },
+            syncAuthFromStorage: () => {
+                if (typeof window === "undefined") return;
+                const access = localStorage.getItem("access");
+                if (!access) {
+                    localStorage.removeItem("refresh");
+                    set({
+                        isLoggedIn: false,
+                        username: '',
+                        profilePicture: null,
+                        sessions: [],
+                        activeSessionId: null,
+                        chatId: null,
+                        messages: [],
+                        sessionMessages: {},
+                        isLimitExceeded: false,
+                    });
+                    return;
+                }
+                set((state) => (state.isLoggedIn ? state : { isLoggedIn: true }));
+            },
+            setAuthUser: (user) => set((state) => {
+                const nextUsername = user?.username ?? '';
+                const shouldReset = state.username && state.username !== nextUsername;
+                return {
+                    isLoggedIn: true,
+                    username: nextUsername,
+                    ...(shouldReset
+                        ? {
+                            profilePicture: null,
+                            sessions: [],
+                            activeSessionId: null,
+                            chatId: null,
+                            messages: [],
+                            sessionMessages: {},
+                            isLimitExceeded: false,
+                        }
+                        : {}),
+                };
+            }),
 
             // Messages
             messages: [],
@@ -294,6 +335,9 @@ export const useDataStore = create<DataState>()(
         }),
         {
             name: 'qwikstudi-data',
+            onRehydrateStorage: () => (state) => {
+                state?.syncAuthFromStorage?.();
+            },
             partialize: (state) => ({
                 isLoggedIn: state.isLoggedIn,
                 username: state.username,

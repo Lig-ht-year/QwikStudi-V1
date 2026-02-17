@@ -64,6 +64,7 @@ export function ChatInput() {
 
     // Speech to Text Implementation
     const [isRecording, setIsRecording] = useState(false);
+    const hasInputContent = input.trim().length > 0 || files.length > 0;
 
     // Initialize guest_id on mount (use UUID format for Django compatibility)
     useEffect(() => {
@@ -474,9 +475,13 @@ export function ChatInput() {
                     <div className="relative md:hidden">
                         <button
                             onClick={() => setShowAttachMenu(!showAttachMenu)}
+                            disabled={isSending}
                             aria-label="Attach files"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
+                                isSending
+                                    ? "text-muted-foreground/30 cursor-not-allowed"
+                                    : "",
                                 showAttachMenu
                                     ? "bg-primary/10 text-primary"
                                     : "text-muted-foreground hover:text-foreground hover:bg-white/5"
@@ -541,8 +546,14 @@ export function ChatInput() {
                     {/* Desktop: Plus Button - Opens file picker directly */}
                     <button
                         onClick={() => fileInputRef.current?.click()}
+                        disabled={isSending}
                         aria-label="Attach files"
-                        className="hidden md:block p-2.5 rounded-full transition-all duration-200 text-muted-foreground hover:text-foreground hover:bg-white/5"
+                        className={cn(
+                            "hidden md:block p-2.5 rounded-full transition-all duration-200",
+                            isSending
+                                ? "text-muted-foreground/30 cursor-not-allowed"
+                                : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                        )}
                     >
                         <PlusCircle className="w-5 h-5" />
                     </button>
@@ -550,8 +561,12 @@ export function ChatInput() {
                     {/* Tools Button - Desktop only */}
                     <button
                         onClick={() => setShowFeatures(!showFeatures)}
+                        disabled={isSending}
                         className={cn(
                             "hidden md:flex items-center gap-1.5 px-3 py-2 rounded-full transition-all",
+                            isSending
+                                ? "text-muted-foreground/30 cursor-not-allowed"
+                                : "",
                             showFeatures
                                 ? "bg-primary/10 text-primary"
                                 : "text-muted-foreground hover:text-foreground hover:bg-white/5"
@@ -572,7 +587,8 @@ export function ChatInput() {
                         value={input}
                         onChange={handleInput}
                         onKeyDown={handleKeyDown}
-                        placeholder="Message QwikStudi..."
+                        placeholder={isSending ? "QwikStudi is responding..." : "Message QwikStudi..."}
+                        disabled={isSending}
                         className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-sm max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
                     />
 
@@ -581,8 +597,12 @@ export function ChatInput() {
                         {/* Mic Button - Visible on all screens */}
                         <button
                             onClick={toggleRecording}
+                            disabled={isSending}
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
+                                isSending
+                                    ? "text-muted-foreground/30 cursor-not-allowed"
+                                    : "",
                                 isRecording
                                     ? "bg-red-500/10 text-red-500 animate-pulse"
                                     : "text-muted-foreground hover:text-foreground hover:bg-white/5"
@@ -598,16 +618,20 @@ export function ChatInput() {
                         {/* Send Button */}
                         <button
                             onClick={handleSubmit}
-                            disabled={!input.trim() && files.length === 0}
+                            disabled={!hasInputContent || isSending}
                             aria-label="Send message"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                input.trim() || files.length > 0
+                                hasInputContent && !isSending
                                     ? "text-primary hover:bg-primary/10"
                                     : "text-muted-foreground/30 cursor-not-allowed"
                             )}
                         >
-                            <ArrowUp className="w-5 h-5" />
+                            {isSending ? (
+                                <Loader2 className="w-5 h-5 animate-spin" />
+                            ) : (
+                                <ArrowUp className="w-5 h-5" />
+                            )}
                         </button>
                     </div>
                 </div>
