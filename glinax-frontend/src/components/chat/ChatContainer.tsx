@@ -132,6 +132,20 @@ const suggestions = [
     { icon: Sparkles, text: "Explain", gradient: "from-blue-400 to-blue-600" },
 ];
 
+type RichMessageType = 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+
+function normalizeMessageType(value: unknown): RichMessageType | undefined {
+    if (value === 'text' || value === 'audio' || value === 'quiz' || value === 'summary' || value === 'notes') {
+        return value;
+    }
+    return undefined;
+}
+
+function normalizeMetadata(value: unknown): Record<string, unknown> | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    return value as Record<string, unknown>;
+}
+
 export function ChatContainer() {
     const router = useRouter();
     const { showToast } = useToast();
@@ -182,20 +196,39 @@ export function ChatContainer() {
 
                 if (!error && data.length > 0) {
                     // Convert backend messages to frontend format
-                    const loadedMessages = data.map(msg => [
-                        {
-                            id: nanoid(),
-                            role: 'user' as const,
-                            content: msg.prompt,
-                            createdAt: new Date(msg.created_at),
-                        },
-                        {
-                            id: nanoid(),
-                            role: 'assistant' as const,
-                            content: msg.response,
-                            createdAt: new Date(msg.created_at),
+                    const loadedMessages = data.flatMap((msg) => {
+                        const createdAt = new Date(msg.created_at);
+                        const mappedMessages: Array<{
+                            id: string;
+                            role: 'user' | 'assistant';
+                            content: string;
+                            createdAt: Date;
+                            type?: RichMessageType;
+                            metadata?: Record<string, unknown>;
+                        }> = [];
+
+                        if (msg.prompt && msg.prompt.trim().length > 0) {
+                            mappedMessages.push({
+                                id: nanoid(),
+                                role: 'user',
+                                content: msg.prompt,
+                                createdAt,
+                                type: normalizeMessageType(msg.prompt_type),
+                                metadata: normalizeMetadata(msg.prompt_metadata),
+                            });
                         }
-                    ]).flat();
+
+                        mappedMessages.push({
+                            id: nanoid(),
+                            role: 'assistant',
+                            content: msg.response,
+                            createdAt,
+                            type: normalizeMessageType(msg.response_type),
+                            metadata: normalizeMetadata(msg.response_metadata),
+                        });
+
+                        return mappedMessages;
+                    });
 
                     // Clear and replace messages
                     useDataStore.getState().clearMessages();

@@ -27,7 +27,7 @@ import {
     Loader2
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { cn } from "@/lib/utils";
+import { cn, formatDisplayName } from "@/lib/utils";
 import Link from "next/link";
 import { useChatStore, ResponseStyle } from "@/stores/chatStore";
 import { useDataStore, Language } from "@/stores/dataStore";
@@ -397,7 +397,7 @@ export default function SettingsPage() {
     const setLanguage = useDataStore((state) => state.setLanguage);
     const t = translations[language];
 
-    const [localUsername, setLocalUsername] = useState(username);
+    const [localUsername, setLocalUsername] = useState(formatDisplayName(username, ""));
     const [notifications, setNotifications] = useState(true);
     const [soundEffects, setSoundEffects] = useState(true);
     const [showLanguageModal, setShowLanguageModal] = useState(false);
@@ -406,13 +406,19 @@ export default function SettingsPage() {
 
     // Sync username from store
     useEffect(() => {
-        setLocalUsername(username);
+        setLocalUsername(formatDisplayName(username, ""));
     }, [username]);
 
     // Save username on blur
     const handleUsernameBlur = () => {
-        if (localUsername !== username) {
-            setUsername(localUsername);
+        const normalizedUsername = formatDisplayName(localUsername, "");
+
+        if (normalizedUsername !== localUsername) {
+            setLocalUsername(normalizedUsername);
+        }
+
+        if (normalizedUsername !== username) {
+            setUsername(normalizedUsername);
         }
     };
 
