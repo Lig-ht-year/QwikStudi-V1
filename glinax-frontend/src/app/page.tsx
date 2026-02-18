@@ -39,13 +39,20 @@ export default function Home() {
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
     const sessions = useDataStore((state) => state.sessions);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
-    const setActiveSessionId = useDataStore((state) => state.setActiveSessionId);
     const setChatId = useDataStore((state) => state.setChatId);
     const chatId = useDataStore((state) => state.chatId);
     const createSession = useDataStore((state) => state.createSession);
     const updateSession = useDataStore((state) => state.updateSession);
     const loadChatHistory = useDataStore((state) => state.loadChatHistory);
     const { showToast } = useToast();
+
+    const parseFeatureError = (error: unknown, fallback: string) => {
+        const axiosError = error as { response?: { status?: number; data?: { error?: string } } };
+        const status = axiosError?.response?.status;
+        const backendMessage = axiosError?.response?.data?.error;
+        const message = backendMessage || fallback;
+        return { status, message };
+    };
 
     const addLoadingAssistantMessage = (content: string) => {
         const id = nanoid();
@@ -103,13 +110,6 @@ export default function Home() {
         };
     }, [isLoggedIn, sessions.length, loadChatHistory]);
 
-    useEffect(() => {
-        if (activeSessionId || sessions.length === 0) return;
-        const firstSession = sessions[0];
-        setActiveSessionId(firstSession.id);
-        setChatId(firstSession.chatId ?? null);
-    }, [activeSessionId, sessions, setActiveSessionId, setChatId]);
-
     const handleTTSGenerate = async (text: string, voice: string, file?: File | null) => {
         if (!requireAuthForFeature()) return;
         const loadingId = addLoadingAssistantMessage("Converting your text into audio...");
@@ -149,10 +149,13 @@ export default function Home() {
                 createdAt: new Date(),
             });
             showToast("Audio generated successfully!", "success");
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("TTS generation failed:", error);
             removeMessage(loadingId);
-            const message = error.response?.data?.error || "Failed to generate audio. Please try again.";
+            const { message } = parseFeatureError(
+                error,
+                "Failed to generate audio. Please try again."
+            );
             addMessage({
                 id: nanoid(),
                 role: 'assistant',
@@ -161,6 +164,7 @@ export default function Home() {
                 createdAt: new Date(),
             });
             showToast(message, "error");
+            throw new Error(message);
         }
     };
 
@@ -215,26 +219,27 @@ export default function Home() {
             });
 
             showToast("Transcription completed!", "success");
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Transcription failed:", error);
 
             removeMessage(loadingId);
 
-            const message =
-                error.response?.status === 401
-                    ? "Please log in to transcribe audio."
-                    : error.response?.data?.error || "Failed to transcribe audio. Please try again.";
+            const { status, message } = parseFeatureError(
+                error,
+                "Failed to transcribe audio. Please try again."
+            );
+            const finalMessage = status === 401 ? "Please log in to transcribe audio." : message;
 
             addMessage({
                 id: nanoid(),
                 role: 'assistant',
-                content: message,
+                content: finalMessage,
                 type: 'text',
                 createdAt: new Date(),
             });
 
-            showToast(message, "error");
-            throw error;
+            showToast(finalMessage, "error");
+            throw new Error(finalMessage);
         }
     };
 
@@ -275,21 +280,25 @@ export default function Home() {
             });
             
             showToast("Quiz generated successfully!", "success");
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Quiz generation failed:", error);
-            
-            // Remove loading message
+
             removeMessage(loadingId);
-            
+
+            const { message } = parseFeatureError(
+                error,
+                "Sorry, I couldn't generate the quiz. Please try again with a different file."
+            );
             addMessage({
                 id: nanoid(),
                 role: 'assistant',
-                content: "Sorry, I couldn't generate the quiz. Please try again with a different file.",
+                content: message,
                 type: 'text',
                 createdAt: new Date(),
             });
-            
-            showToast(error.response?.data?.error || "Failed to generate quiz", "error");
+
+            showToast(message, "error");
+            throw new Error(message);
         }
     };
 
@@ -345,21 +354,25 @@ export default function Home() {
             });
             
             showToast("Summary generated successfully!", "success");
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Summarization failed:", error);
-            
-            // Remove loading message
+
             removeMessage(loadingId);
-            
+
+            const { message } = parseFeatureError(
+                error,
+                "Sorry, I couldn't generate the summary. Please try again with a different file."
+            );
             addMessage({
                 id: nanoid(),
                 role: 'assistant',
-                content: "Sorry, I couldn't generate the summary. Please try again with a different file.",
+                content: message,
                 type: 'text',
                 createdAt: new Date(),
             });
-            
-            showToast(error.response?.data?.error || "Failed to generate summary", "error");
+
+            showToast(message, "error");
+            throw new Error(message);
         }
     };
 

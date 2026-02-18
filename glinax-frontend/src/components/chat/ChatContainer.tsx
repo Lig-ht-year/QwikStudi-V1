@@ -132,10 +132,10 @@ const suggestions = [
     { icon: Sparkles, text: "Explain", gradient: "from-blue-400 to-blue-600" },
 ];
 
-type RichMessageType = 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+type RichMessageType = 'text' | 'audio' | 'quiz' | 'summary' | 'notes' | 'attachment';
 
 function normalizeMessageType(value: unknown): RichMessageType | undefined {
-    if (value === 'text' || value === 'audio' || value === 'quiz' || value === 'summary' || value === 'notes') {
+    if (value === 'text' || value === 'audio' || value === 'quiz' || value === 'summary' || value === 'notes' || value === 'attachment') {
         return value;
     }
     return undefined;
@@ -194,46 +194,56 @@ export function ChatContainer() {
                 const { error, data } = await getChatMessages(Number(chatId));
                 if (!isMounted) return;
 
-                if (!error && data.length > 0) {
-                    // Convert backend messages to frontend format
-                    const loadedMessages = data.flatMap((msg) => {
-                        const createdAt = new Date(msg.created_at);
-                        const mappedMessages: Array<{
-                            id: string;
-                            role: 'user' | 'assistant';
-                            content: string;
-                            createdAt: Date;
-                            type?: RichMessageType;
-                            metadata?: Record<string, unknown>;
-                        }> = [];
+                // Always clear previous chat content when switching sessions.
+                // If the target session is empty (or fails to load), the UI should stay empty.
+                useDataStore.getState().clearMessages();
+                if (error || data.length === 0) {
+                    return;
+                }
 
-                        if (msg.prompt && msg.prompt.trim().length > 0) {
+                // Convert backend messages to frontend format
+                const loadedMessages = data.flatMap((msg) => {
+                    const createdAt = new Date(msg.created_at);
+                    const mappedMessages: Array<{
+                        id: string;
+                        role: 'user' | 'assistant';
+                        content: string;
+                        createdAt: Date;
+                        type?: RichMessageType;
+                        metadata?: Record<string, unknown>;
+                    }> = [];
+
+                        const promptType = normalizeMessageType(msg.prompt_type);
+                        const promptMetadata = normalizeMetadata(msg.prompt_metadata);
+                        const hasAttachmentFiles =
+                            promptType === 'attachment' &&
+                            Array.isArray((promptMetadata as { files?: unknown[] } | undefined)?.files) &&
+                            ((promptMetadata as { files?: unknown[] } | undefined)?.files?.length || 0) > 0;
+
+                        if ((msg.prompt && msg.prompt.trim().length > 0) || hasAttachmentFiles) {
                             mappedMessages.push({
                                 id: nanoid(),
                                 role: 'user',
                                 content: msg.prompt,
                                 createdAt,
-                                type: normalizeMessageType(msg.prompt_type),
-                                metadata: normalizeMetadata(msg.prompt_metadata),
+                                type: promptType,
+                                metadata: promptMetadata,
                             });
                         }
 
-                        mappedMessages.push({
-                            id: nanoid(),
-                            role: 'assistant',
-                            content: msg.response,
-                            createdAt,
-                            type: normalizeMessageType(msg.response_type),
-                            metadata: normalizeMetadata(msg.response_metadata),
-                        });
-
-                        return mappedMessages;
+                    mappedMessages.push({
+                        id: nanoid(),
+                        role: 'assistant',
+                        content: msg.response,
+                        createdAt,
+                        type: normalizeMessageType(msg.response_type),
+                        metadata: normalizeMetadata(msg.response_metadata),
                     });
 
-                    // Clear and replace messages
-                    useDataStore.getState().clearMessages();
-                    loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
-                }
+                    return mappedMessages;
+                });
+
+                loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
             } else if (!activeSessionId || (activeSessionId && !chatId)) {
                 // Clear messages when no session is selected
                 useDataStore.getState().clearMessages();

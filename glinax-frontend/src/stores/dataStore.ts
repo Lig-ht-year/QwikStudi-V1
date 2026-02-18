@@ -15,7 +15,7 @@ interface Message {
     id: string;
     role: 'user' | 'assistant';
     content: string;
-    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes' | 'attachment';
     metadata?: Record<string, unknown>;
     createdAt: Date;
 }
@@ -157,7 +157,7 @@ export const useDataStore = create<DataState>()(
                 localStorage.removeItem("refresh");
                 set({
                     isLoggedIn: false,
-                    username: '',
+                    username: null,
                     profilePicture: null,
                     sessions: [],
                     activeSessionId: null,
@@ -269,9 +269,14 @@ export const useDataStore = create<DataState>()(
                 const newActiveId = state.activeSessionId === id
                     ? (newSessions[0]?.id || null)
                     : state.activeSessionId;
+                const newActiveSession = newActiveId
+                    ? newSessions.find((session) => session.id === newActiveId)
+                    : null;
                 return {
                     sessions: newSessions,
                     activeSessionId: newActiveId,
+                    chatId: newActiveSession?.chatId ?? null,
+                    messages: [],
                     sessionMessages: Object.fromEntries(
                         Object.entries(state.sessionMessages).filter(([sessionId]) => sessionId !== id)
                     ),
@@ -358,7 +363,7 @@ export const useDataStore = create<DataState>()(
                 sessions: [],
                 activeSessionId: null,
                 chatId: null,
-                username: '',
+                username: null,
                 profilePicture: null,
                 plan: 'free',
                 aiSettings: DEFAULT_AI_SETTINGS,

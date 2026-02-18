@@ -92,6 +92,11 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const filteredSessions = visibleSessions.filter((session) =>
         session.title.toLowerCase().includes(searchQuery.toLowerCase())
     );
+    const isDraftActive = isLoggedIn && activeSessionId === null;
+    const showDraftEntry =
+        isDraftActive &&
+        (!searchQuery || "new chat".includes(searchQuery.toLowerCase()));
+    const displayedSessionCount = filteredSessions.length + (showDraftEntry ? 1 : 0);
 
     return (
         <div
@@ -250,15 +255,15 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                                 {searchQuery ? t.searchResults : t.recentActivity}
                             </span>
-                            {filteredSessions.length > 0 && (
-                                <span className="text-xs text-muted-foreground/50">{filteredSessions.length}</span>
+                            {displayedSessionCount > 0 && (
+                                <span className="text-xs text-muted-foreground/50">{displayedSessionCount}</span>
                             )}
                         </div>
                     )}
 
                     {/* Sessions List */}
                     <div className="">
-                        {filteredSessions.length === 0 ? (
+                        {filteredSessions.length === 0 && !showDraftEntry ? (
                             isSidebarOpen && (
                                 <div className="text-center py-8 px-4">
                                     <MessageSquare className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
@@ -277,6 +282,28 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             )
                         ) : (
                             <div className="space-y-1 pb-2">
+                                {showDraftEntry && (
+                                    <div
+                                        onClick={startDraftSession}
+                                        role="button"
+                                        tabIndex={0}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                startDraftSession();
+                                            }
+                                        }}
+                                        className={cn(
+                                            "w-full flex items-center gap-3 p-3 rounded-xl transition-all group relative overflow-hidden cursor-pointer bg-primary/10 text-primary font-medium",
+                                            !isSidebarOpen && "justify-center p-2.5"
+                                        )}
+                                    >
+                                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full" />
+                                        <MessageSquare className="w-4 h-4 shrink-0 text-primary" />
+                                        {isSidebarOpen && (
+                                            <span className="truncate text-sm flex-1 text-left">New Chat</span>
+                                        )}
+                                    </div>
+                                )}
                                 {filteredSessions.map((session) => (
                                     <div
                                         key={session.id}

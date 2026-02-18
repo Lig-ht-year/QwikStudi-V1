@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
     User,
     Bell,
@@ -377,7 +377,6 @@ function LanguageModal({ isOpen, onClose, currentLanguage, onSelect }: { isOpen:
 export default function SettingsPage() {
     const {
         username,
-        setUsername,
         profilePicture,
         setProfilePicture,
         plan,
@@ -397,30 +396,12 @@ export default function SettingsPage() {
     const setLanguage = useDataStore((state) => state.setLanguage);
     const t = translations[language];
 
-    const [localUsername, setLocalUsername] = useState(formatDisplayName(username, ""));
+    const displayUsername = formatDisplayName(username, t.guest);
     const [notifications, setNotifications] = useState(true);
     const [soundEffects, setSoundEffects] = useState(true);
     const [showLanguageModal, setShowLanguageModal] = useState(false);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
     const { showToast } = useToast();
-
-    // Sync username from store
-    useEffect(() => {
-        setLocalUsername(formatDisplayName(username, ""));
-    }, [username]);
-
-    // Save username on blur
-    const handleUsernameBlur = () => {
-        const normalizedUsername = formatDisplayName(localUsername, "");
-
-        if (normalizedUsername !== localUsername) {
-            setLocalUsername(normalizedUsername);
-        }
-
-        if (normalizedUsername !== username) {
-            setUsername(normalizedUsername);
-        }
-    };
 
     const handleProfilePictureChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -511,17 +492,9 @@ export default function SettingsPage() {
                             </button>
                         </div>
                         <div className="flex-1 min-w-0">
-                            <label htmlFor="username-input" className="sr-only">Your name</label>
-                            <input
-                                id="username-input"
-                                type="text"
-                                value={localUsername}
-                                onChange={(e) => setLocalUsername(e.target.value)}
-                                onBlur={handleUsernameBlur}
-                                aria-label="Your display name"
-                                className="text-lg font-semibold bg-transparent border-none outline-none w-full text-foreground focus:ring-2 focus:ring-primary/50 rounded px-1 -ml-1"
-                                placeholder={t.guest}
-                            />
+                            <p className="text-lg font-semibold text-foreground truncate">
+                                {displayUsername}
+                            </p>
                             <div className="flex items-center gap-2 mt-0.5">
                                 {plan === 'pro' ? (
                                     <>

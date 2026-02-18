@@ -1,17 +1,16 @@
-from rest_framework import serializers
-from django.contrib.auth.models import User
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer
-from rest_framework_simplejwt.settings import api_settings
-from rest_framework import serializers
-from django.contrib.auth.models import User
-from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.contrib.auth.models import update_last_login
+import logging
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import User, update_last_login
+from rest_framework import serializers
 from rest_framework import serializers as drf_serializers
+from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.serializers import (
+    TokenObtainPairSerializer,
+    TokenRefreshSerializer,
+)
+from rest_framework_simplejwt.tokens import RefreshToken
+
+logger = logging.getLogger(__name__)
 class CustomTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
@@ -38,6 +37,12 @@ class UserSerializer(serializers.ModelSerializer):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     email = drf_serializers.EmailField(required=False, allow_blank=True)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Allow frontend to authenticate with email + password only.
+        if self.username_field in self.fields:
+            self.fields[self.username_field].required = False
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -46,20 +51,36 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         username = attrs.get("username")
-        password = attrs.get("password")
         email = attrs.get("email")
+        password = attrs.get("password")
 
-        # Allow login by email
+        def resolve_username_from_email(raw_email: str) -> str | None:
+            candidates = list(
+                User.objects.filter(email__iexact=raw_email, is_active=True).order_by("id")
+            )
+            if not candidates:
+                return None
+            if len(candidates) > 1:
+                logger.error("Duplicate active email detected during login for: %s", raw_email)
+                raise drf_serializers.ValidationError(
+                    "Multiple accounts found for this email. Please contact support."
+                )
+            return candidates[0].username
+
         if email and not username:
-            user = User.objects.filter(email__iexact=email).first()
-            if not user:
+            resolved_username = resolve_username_from_email(email)
+            if not resolved_username:
                 raise drf_serializers.ValidationError("Invalid email or password.")
-            username = user.username
-            attrs["username"] = username
+            attrs["username"] = resolved_username
         elif username and "@" in username:
-            user = User.objects.filter(email__iexact=username).first()
-            if user:
-                attrs["username"] = user.username
+            resolved_username = resolve_username_from_email(username)
+            if resolved_username:
+                attrs["username"] = resolved_username
+
+        if not attrs.get("username"):
+            raise drf_serializers.ValidationError("Email or username is required.")
+        if not password:
+            raise drf_serializers.ValidationError("Password is required.")
 
         data = super().validate(attrs)
 
@@ -91,10 +112,18 @@ class RegisterSerializer(serializers.ModelSerializer):
         model = User
         fields = ['username', 'email', 'password']
 
+    def validate_email(self, value):
+        email = (value or "").strip().lower()
+        if not email:
+            raise serializers.ValidationError("Email is required.")
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return email
+
     def create(self, validated_data):
         user = User.objects.create_user(
-            username=validated_data['username'],
-            email=validated_data.get('email'),
+            username=(validated_data.get('username') or "").strip(),
+            email=(validated_data.get('email') or "").strip().lower(),
             password=validated_data['password']
         )
         return user

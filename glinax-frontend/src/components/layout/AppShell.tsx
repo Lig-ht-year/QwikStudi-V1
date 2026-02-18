@@ -42,8 +42,11 @@ export function AppShell({ children }: AppShellProps) {
                 if (res?.data?.username) {
                     setAuthUser({ username: res.data.username });
                 }
-            } catch {
-                logout();
+            } catch (error: unknown) {
+                const status = (error as { response?: { status?: number } })?.response?.status;
+                if (status === 401 || status === 403) {
+                    logout();
+                }
             }
         })();
     }, [setAuthUser, logout]);

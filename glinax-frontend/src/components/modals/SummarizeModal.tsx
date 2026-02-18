@@ -16,7 +16,7 @@ import { useDataStore } from "@/stores/dataStore";
 interface SummarizeModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (file: File | null, options: SummaryOptions, content?: string) => void;
+    onGenerate: (file: File | null, options: SummaryOptions, content?: string) => Promise<void> | void;
     initialContent?: string;
 }
 
@@ -38,7 +38,9 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
     const [format, setFormat] = useState<"bullets" | "paragraphs">("bullets");
     const [includeKeyTerms, setIncludeKeyTerms] = useState(true);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [submitError, setSubmitError] = useState("");
     const clearSelectedContent = useDataStore((state) => state.clearSelectedContent);
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
     // Get content from store when modal opens (if no initialContent prop)
     const content = initialContent || useDataStore.getState().selectedContent.content;
@@ -52,14 +54,37 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
 
     if (!isOpen) return null;
 
+    const validateFile = (file: File): boolean => {
+        if (file.size > MAX_FILE_SIZE) {
+            setSubmitError(`File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
+            return false;
+        }
+        const ext = file.name.toLowerCase().split(".").pop();
+        const validExtensions = ["txt", "pdf", "doc", "docx", "ppt", "pptx", "md"];
+        if (!ext || !validExtensions.includes(ext)) {
+            setSubmitError(`Unsupported file type. Allowed: ${validExtensions.join(", ")}.`);
+            return false;
+        }
+        setSubmitError("");
+        return true;
+    };
+
     const handleGenerate = () => {
+        setSubmitError("");
         setIsGenerating(true);
-        // Backend will handle summarization
-        setTimeout(() => {
-            onGenerate(uploadedFile, { length, format, includeKeyTerms }, content);
+        Promise.resolve(onGenerate(uploadedFile, { length, format, includeKeyTerms }, content))
+            .then(() => {
+                setUploadedFile(null);
+                setSubmitError("");
+                onClose();
+            })
+            .catch((error: unknown) => {
+                const message = error instanceof Error ? error.message : "Failed to summarize document.";
+                setSubmitError(message);
+            })
+            .finally(() => {
             setIsGenerating(false);
-            onClose();
-        }, 2000);
+            });
     };
 
     // Check if we have content to summarize (either from file or from message)
@@ -107,9 +132,15 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
                         <input
                             id="summarize-file-input"
                             type="file"
-                            accept=".txt,.pdf,.doc,.docx,.ppt,.pptx"
+                            accept=".txt,.pdf,.doc,.docx,.ppt,.pptx,.md"
                             className="hidden"
-                            onChange={(e) => e.target.files?.[0] && setUploadedFile(e.target.files[0])}
+                            onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                if (validateFile(file)) {
+                                    setUploadedFile(file);
+                                }
+                            }}
                         />
                         <Upload className={cn("w-6 h-6", uploadedFile ? "text-primary" : "text-muted-foreground")} />
                         {uploadedFile ? (
@@ -214,6 +245,9 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
 
                 {/* Footer */}
                 <div className="p-5 border-t border-border/50 flex items-center justify-end bg-muted/20">
+                    {submitError && (
+                        <p className="text-xs text-red-400 mr-auto">{submitError}</p>
+                    )}
                     <button
                         onClick={handleGenerate}
                         disabled={!hasContent || isGenerating}

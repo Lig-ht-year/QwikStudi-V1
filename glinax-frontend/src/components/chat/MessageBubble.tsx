@@ -16,7 +16,7 @@ interface MessageBubbleProps {
     role: 'user' | 'assistant';
     content: string;
     createdAt: Date;
-    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes' | 'attachment';
     metadata?: Record<string, unknown>;
     onRegenerate?: () => void;
     onRate?: (rating: 'like' | 'dislike' | null) => void;
@@ -57,7 +57,7 @@ function formatContentForDisplay(content: unknown): string {
     return String(content);
 }
 
-export function MessageBubble({ role, content, createdAt: _createdAt, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
+export function MessageBubble({ role, content, createdAt, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
     const isAssistant = role === 'assistant';
     const isLoadingPlaceholder = Boolean(type === 'text' && metadata?.isLoading === true);
     const [copied, setCopied] = useState(false);
@@ -69,6 +69,16 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
 
     // Ensure content is always a string for rendering
     const displayContent = formatContentForDisplay(content);
+    const attachmentFiles = Array.isArray((metadata as { files?: unknown[] } | undefined)?.files)
+        ? ((metadata as { files?: Array<{ name?: string; size?: number; ext?: string }> }).files || [])
+        : [];
+
+    const formatFileSize = (bytes?: number) => {
+        if (!bytes || bytes <= 0) return "";
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
 
     const handleRate = (newRating: 'like' | 'dislike') => {
         const updatedRating = rating === newRating ? null : newRating;
@@ -81,8 +91,9 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
         }
     };
 
-    const handleFeedbackSubmit = (_feedback: { reason: string; details?: string }) => {
+    const handleFeedbackSubmit = (feedback: { reason: string; details?: string }) => {
         // TODO: Backend will handle feedback storage
+        void feedback;
         if (process.env.NODE_ENV === 'development') {
             // console.log('Feedback submitted:', feedback);
         }
@@ -147,9 +158,33 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
     // User Message - Dark rounded card style (Gemini-inspired)
     if (!isAssistant) {
         return (
-            <div className="w-full flex justify-end mb-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <div
+                className="w-full flex justify-end mb-6 animate-in fade-in slide-in-from-bottom-2 duration-300"
+                data-created-at={createdAt.toISOString()}
+            >
                 <div className="max-w-[85%] sm:max-w-[70%]">
                     <div className="bg-card/80 backdrop-blur-sm border border-white/10 rounded-2xl p-4 shadow-lg">
+                        {type === 'attachment' && attachmentFiles.length > 0 && (
+                            <div className="space-y-2 mb-2">
+                                {attachmentFiles.map((file, index) => (
+                                    <div
+                                        key={`${file.name || 'file'}-${file.size || 0}-${index}`}
+                                        className="flex items-center gap-2 bg-background/60 border border-white/10 rounded-xl px-2.5 py-2"
+                                        title={String(file.name || "Attachment")}
+                                    >
+                                        <div className="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center shrink-0">
+                                            <FileText className="w-3.5 h-3.5 text-primary" />
+                                        </div>
+                                        <div className="min-w-0">
+                                            <p className="text-xs font-medium truncate">{String(file.name || "Attachment")}</p>
+                                            <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                                                {String(file.ext || "file")} {formatFileSize(file.size)}
+                                            </p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                         {displayContent && (
                             <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">
                                 {displayContent}
@@ -163,7 +198,10 @@ export function MessageBubble({ role, content, createdAt: _createdAt, type, meta
 
     // AI Message - Clean text with icon (Gemini-inspired)
     return (
-        <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300 group">
+        <div
+            className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300 group"
+            data-created-at={createdAt.toISOString()}
+        >
             {/* AI Header with Q Icon */}
             <div className="flex items-center gap-2 mb-3">
                 <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shadow-md">

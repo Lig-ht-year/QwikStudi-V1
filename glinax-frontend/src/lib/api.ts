@@ -6,9 +6,6 @@ const apiBaseUrl = rawApiUrl.replace(/\/+$/, "").replace(/\/chat$/, "");
 
 const api = axios.create({
   baseURL: apiBaseUrl,
-  headers: {
-    "Content-Type": "application/json",
-  },
 });
 
 function isPublicAuthEndpoint(url?: string): boolean {
@@ -25,6 +22,14 @@ function isPublicAuthEndpoint(url?: string): boolean {
 api.interceptors.request.use((config) => {
   if (typeof window === "undefined") return config;
   if (isPublicAuthEndpoint(config.url)) return config;
+  const isFormData =
+    typeof FormData !== "undefined" && config.data instanceof FormData;
+  if (!isFormData) {
+    config.headers = config.headers || {};
+    if (!config.headers["Content-Type"]) {
+      config.headers["Content-Type"] = "application/json";
+    }
+  }
   const access = localStorage.getItem("access");
   if (access) {
     config.headers = config.headers || {};
@@ -61,6 +66,9 @@ api.interceptors.response.use(
 
         const newAccess = res.data.access;
         localStorage.setItem("access", newAccess);
+        if (res.data?.refresh) {
+          localStorage.setItem("refresh", res.data.refresh);
+        }
 
         // Retry original request with new access
         originalRequest.headers.Authorization = `Bearer ${newAccess}`;

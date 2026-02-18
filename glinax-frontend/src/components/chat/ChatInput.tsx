@@ -14,8 +14,6 @@ import {
     FileText,
     Upload,
     Loader2,
-    Camera,
-    Image,
     Wrench
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -29,6 +27,7 @@ import { commitChat } from "@/lib/CommitChat";
 
 // Maximum file size: 10MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const ALLOWED_CHAT_FILE_EXTENSIONS = ['pdf', 'txt', 'doc', 'docx', 'md', 'ppt', 'pptx'];
 
 export function ChatInput() {
     const router = useRouter();
@@ -40,8 +39,6 @@ export function ChatInput() {
     const [isSending, setIsSending] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const imageInputRef = useRef<HTMLInputElement>(null);
-    const cameraInputRef = useRef<HTMLInputElement>(null);
     const recognitionRef = useRef<any>(null);
     const { showToast } = useToast();
     const isLoading = useUIStore((state) => state.isLoading);
@@ -185,19 +182,41 @@ export function ChatInput() {
         if (isBusy) return;
 
         const userMessage = input.trim();
+        const selectedFiles = [...files];
+        const fileNames = selectedFiles.map((file) => file.name);
+        const fileSummary = fileNames.length > 0 ? `Attached file${fileNames.length > 1 ? "s" : ""}: ${fileNames.join(", ")}` : "";
+        const displayMessage = userMessage || fileSummary;
+        const hasFiles = selectedFiles.length > 0;
         const guestId = Cookies.get("guest_id");
         const now = new Date();
 
         // Add user message immediately
-        addMessage({
-            id: nanoid(),
-            role: 'user',
-            content: userMessage,
-            createdAt: now,
-        });
+        if (hasFiles) {
+            addMessage({
+                id: nanoid(),
+                role: 'user',
+                content: userMessage,
+                type: 'attachment',
+                metadata: {
+                    files: selectedFiles.map(mapFileMetadata),
+                    caption: userMessage,
+                    status: 'sent',
+                },
+                createdAt: now,
+            });
+        } else {
+            addMessage({
+                id: nanoid(),
+                role: 'user',
+                content: displayMessage,
+                createdAt: now,
+            });
+        }
 
-        const trimmedTitle = userMessage.length > 60 ? `${userMessage.slice(0, 60)}...` : userMessage;
+        const titleSource = userMessage || fileSummary || "New Chat";
+        const trimmedTitle = titleSource.length > 60 ? `${titleSource.slice(0, 60)}...` : titleSource;
 
+        // Clear composer state immediately after send click.
         setInput("");
         setFiles([]);
         if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -207,12 +226,22 @@ export function ChatInput() {
         setIsLoading(true);
 
         try {
-            const res = await api.post("/chat/", {
-                prompt: userMessage,
-                guest_id: guestId,
-                chat_id: chatId,  // Pass existing chat_id if available
-                response_style: aiSettings.responseStyle,
-            });
+            const res = hasFiles
+                ? await (() => {
+                    const formData = new FormData();
+                    formData.append("prompt", userMessage);
+                    if (guestId) formData.append("guest_id", guestId);
+                    if (chatId) formData.append("chat_id", String(chatId));
+                    formData.append("response_style", aiSettings.responseStyle);
+                    selectedFiles.forEach((file) => formData.append("files", file));
+                    return api.post("/chat/", formData);
+                })()
+                : await api.post("/chat/", {
+                    prompt: userMessage,
+                    guest_id: guestId,
+                    chat_id: chatId,  // Pass existing chat_id if available
+                    response_style: aiSettings.responseStyle,
+                });
 
             if (res.data?.guest_id && res.data.guest_id !== guestId) {
                 Cookies.set("guest_id", res.data.guest_id, {
@@ -289,12 +318,14 @@ export function ChatInput() {
             }
         } catch (error: any) {
             console.error("Chat API error:", error);
+            const message = error?.response?.data?.error || "Sorry, I couldn't process your request. Please try again.";
             addMessage({
                 id: nanoid(),
                 role: 'assistant',
-                content: "Sorry, I couldn't process your request. Please try again.",
+                content: message,
                 createdAt: new Date(),
             });
+            showToast(message, "error");
         } finally {
             setIsSending(false);
             setIsLoading(false);
@@ -311,6 +342,24 @@ export function ChatInput() {
     const removeFile = (index: number) => {
         setFiles(prev => prev.filter((_, i) => i !== index));
     };
+
+    const getFileExt = (fileName: string) => {
+        const ext = fileName.split(".").pop()?.toLowerCase();
+        return ext || "file";
+    };
+
+    const formatFileSize = (bytes: number) => {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+
+    const mapFileMetadata = (file: File) => ({
+        name: file.name,
+        size: file.size,
+        ext: getFileExt(file.name),
+        content_type: file.type || "",
+    });
 
     // Drag and drop handlers
     const handleDragEnter = (e: React.DragEvent) => {
@@ -348,7 +397,11 @@ export function ChatInput() {
                     return false;
                 }
                 const ext = file.name.toLowerCase().split('.').pop();
-                return ['pdf', 'txt', 'doc', 'docx', 'md'].includes(ext || '');
+                if (!ALLOWED_CHAT_FILE_EXTENSIONS.includes(ext || '')) {
+                    showToast(`"${file.name}" is not supported in chat. Use: ${ALLOWED_CHAT_FILE_EXTENSIONS.join(', ')}`, "error");
+                    return false;
+                }
+                return true;
             });
 
             if (supportedFiles.length > 0) {
@@ -364,6 +417,11 @@ export function ChatInput() {
             const validFiles = Array.from(selectedFiles).filter(file => {
                 if (file.size > MAX_FILE_SIZE) {
                     showToast(`File "${file.name}" exceeds 10MB limit`, "error");
+                    return false;
+                }
+                const ext = file.name.toLowerCase().split('.').pop();
+                if (!ALLOWED_CHAT_FILE_EXTENSIONS.includes(ext || '')) {
+                    showToast(`"${file.name}" is not supported in chat. Use: ${ALLOWED_CHAT_FILE_EXTENSIONS.join(', ')}`, "error");
                     return false;
                 }
                 return true;
@@ -426,7 +484,7 @@ export function ChatInput() {
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileInputChange}
-                accept=".pdf,.txt,.doc,.docx,.md"
+                accept=".pdf,.txt,.doc,.docx,.md,.ppt,.pptx"
                 multiple
                 className="hidden"
             />
@@ -448,46 +506,45 @@ export function ChatInput() {
                         <div className="flex flex-col items-center gap-2 text-primary">
                             <Upload className="w-8 h-8" />
                             <span className="font-medium text-sm">Drop files here</span>
-                            <span className="text-xs text-muted-foreground">PDF, TXT, DOC, DOCX, MD</span>
+                            <span className="text-xs text-muted-foreground">PDF, TXT, DOC, DOCX, MD, PPT, PPTX</span>
                         </div>
                     </div>
                 )}
 
                 {/* Files Preview */}
                 {files.length > 0 && (
-                    <div className="flex flex-wrap gap-2 px-4 pt-3 pb-2 border-b border-white/5">
+                    <div className="px-3 pt-3 pb-2 border-b border-white/5">
+                        <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-1">
                         {files.map((file, i) => (
-                            <div key={i} className="flex items-center gap-2 bg-background/50 p-1.5 rounded-lg text-xs font-medium border border-white/5">
-                                <FileText className="w-3 h-3 text-primary" />
-                                <span className="truncate max-w-[120px]">{file.name}</span>
-                                <button onClick={() => removeFile(i)} className="hover:text-destructive">
-                                    <X className="w-3 h-3" />
-                                </button>
-                            </div>
+                                <div
+                                    key={`${file.name}-${file.size}-${i}`}
+                                    className="group flex items-center gap-2 pl-2 pr-1.5 py-1.5 bg-background/70 rounded-full border border-white/10 min-w-0"
+                                    title={file.name}
+                                >
+                                    <div className="w-6 h-6 rounded-full bg-primary/15 text-primary flex items-center justify-center shrink-0">
+                                        <FileText className="w-3.5 h-3.5" />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <p className="text-xs font-medium truncate max-w-[150px]">{file.name}</p>
+                                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                                            {getFileExt(file.name)} · {formatFileSize(file.size)}
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => removeFile(i)}
+                                        className="w-5 h-5 rounded-full flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+                                        aria-label={`Remove ${file.name}`}
+                                    >
+                                        <X className="w-3 h-3" />
+                                    </button>
+                                </div>
                         ))}
+                        </div>
                     </div>
                 )}
 
                 {/* Input Row */}
                 <div className="flex items-center gap-1 p-2">
-                    {/* Hidden file inputs for different types */}
-                    <input
-                        type="file"
-                        ref={imageInputRef}
-                        onChange={handleFileInputChange}
-                        accept="image/*"
-                        multiple
-                        className="hidden"
-                    />
-                    <input
-                        type="file"
-                        ref={cameraInputRef}
-                        onChange={handleFileInputChange}
-                        accept="image/*"
-                        capture="environment"
-                        className="hidden"
-                    />
-
                     {/* Mobile: Plus Button opens attachment menu */}
                     <div className="relative md:hidden">
                         <button
@@ -510,28 +567,6 @@ export function ChatInput() {
                         {/* Mobile Attachment Menu - ChatGPT Style */}
                         {showAttachMenu && (
                             <div className="absolute bottom-full left-0 mb-2 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 min-w-[180px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
-                                {/* Camera */}
-                                <button
-                                    onClick={() => { cameraInputRef.current?.click(); setShowAttachMenu(false); }}
-                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
-                                >
-                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-400 to-rose-600 flex items-center justify-center shadow-sm">
-                                        <Camera className="w-4 h-4 text-white" />
-                                    </div>
-                                    <span className="font-medium text-foreground text-sm">Camera</span>
-                                </button>
-
-                                {/* Photos */}
-                                <button
-                                    onClick={() => { imageInputRef.current?.click(); setShowAttachMenu(false); }}
-                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 text-left transition-colors"
-                                >
-                                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center shadow-sm">
-                                        <Image className="w-4 h-4 text-white" />
-                                    </div>
-                                    <span className="font-medium text-foreground text-sm">Photos</span>
-                                </button>
-
                                 {/* Document */}
                                 <button
                                     onClick={() => { fileInputRef.current?.click(); setShowAttachMenu(false); }}
@@ -542,9 +577,6 @@ export function ChatInput() {
                                     </div>
                                     <span className="font-medium text-foreground text-sm">Document</span>
                                 </button>
-
-                                {/* Divider */}
-                                <div className="my-1 border-t border-white/5" />
 
                                 {/* Tools */}
                                 <button

@@ -10,6 +10,7 @@ import {
     ToggleLeft,
     PenLine,
     BookOpen,
+    Lock,
     Minus,
     Plus,
     Sparkles
@@ -21,7 +22,7 @@ import { useDataStore } from "@/stores/dataStore";
 interface QuizConfigModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (config: QuizConfig, content?: string) => void;
+    onGenerate: (config: QuizConfig, content?: string) => Promise<void> | void;
     initialContent?: string;
 }
 
@@ -52,7 +53,9 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
     const [difficulty, setDifficulty] = useState("medium");
     const [isGenerating, setIsGenerating] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
+    const [submitError, setSubmitError] = useState("");
     const { showToast } = useToast();
+    const plan = useDataStore((state) => state.plan);
     const clearSelectedContent = useDataStore((state) => state.clearSelectedContent);
 
     // Get content from store when modal opens (if no initialContent prop)
@@ -104,24 +107,39 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
     const handleGenerate = () => {
         // Allow generation with either uploaded file or stored content
         if (!uploadedFile && !content) return;
+        setSubmitError("");
         setIsGenerating(true);
-        // Backend will handle quiz generation
-        setTimeout(() => {
-            onGenerate({ file: uploadedFile, questionType, questionCount, difficulty }, content);
+        Promise.resolve(onGenerate({ file: uploadedFile, questionType, questionCount, difficulty }, content))
+            .then(() => {
+                setUploadedFile(null);
+                setSubmitError("");
+                onClose();
+            })
+            .catch((error: unknown) => {
+                const message = error instanceof Error ? error.message : "Failed to generate quiz.";
+                setSubmitError(message);
+            })
+            .finally(() => {
             setIsGenerating(false);
-            onClose();
-        }, 2000);
+            });
     };
 
     // Check if we have content to generate quiz from (either from file or from message)
     const hasContent = uploadedFile || content;
+    const isPremium = plan === "pro";
+    const isQuestionTypeLocked = !isPremium && ["tf", "fill", "essay"].includes(questionType);
+
+    const closeModal = () => {
+        setSubmitError("");
+        onClose();
+    };
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             {/* Backdrop */}
             <div
                 className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-                onClick={onClose}
+                onClick={closeModal}
             />
 
             {/* Modal */}
@@ -138,7 +156,7 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                         </div>
                     </div>
                     <button
-                        onClick={onClose}
+                        onClick={closeModal}
                         className="p-1.5 hover:bg-muted/50 rounded-full transition-colors text-muted-foreground hover:text-foreground"
                     >
                         <X className="w-4 h-4" />
@@ -227,18 +245,32 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                     {/* Question Type */}
                     <div className="space-y-2">
                         <label className="text-xs font-semibold text-foreground/80">Question Type</label>
+                        {!isPremium && (
+                            <p className="text-[11px] text-muted-foreground">
+                                Free plan: only Multiple Choice is available. Upgrade for True/False, Fill in the Blank, and Essay.
+                            </p>
+                        )}
                         <div className="grid grid-cols-2 gap-2">
                             {questionTypes.map((type) => {
                                 const Icon = type.icon;
+                                const isLocked = !isPremium && ["tf", "fill", "essay"].includes(type.id);
                                 return (
                                     <button
                                         key={type.id}
-                                        onClick={() => setQuestionType(type.id)}
+                                        onClick={() => {
+                                            if (!isLocked) {
+                                                setQuestionType(type.id);
+                                                setSubmitError("");
+                                                return;
+                                            }
+                                            showToast("Upgrade to Pro to use this question type.", "info");
+                                        }}
                                         className={cn(
                                             "p-3 rounded-xl border text-left transition-all group",
                                             questionType === type.id
                                                 ? "border-primary/50 bg-primary/10"
-                                                : "border-border/50 hover:bg-muted/50"
+                                                : "border-border/50 hover:bg-muted/50",
+                                            isLocked && "opacity-70"
                                         )}
                                     >
                                         <div className="flex items-center gap-2.5">
@@ -249,7 +281,10 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                                                 <Icon className="w-4 h-4" />
                                             </div>
                                             <div>
-                                                <div className="font-medium text-sm text-foreground">{type.name}</div>
+                                                <div className="font-medium text-sm text-foreground flex items-center gap-1.5">
+                                                    {type.name}
+                                                    {isLocked && <Lock className="w-3 h-3 text-primary" />}
+                                                </div>
                                                 <div className="text-[10px] text-muted-foreground leading-tight mt-0.5">{type.description}</div>
                                             </div>
                                         </div>
@@ -304,15 +339,20 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
 
                 {/* Footer */}
                 <div className="p-5 border-t border-border/50 flex items-center justify-between bg-background sticky bottom-0 z-20">
-                    <div className="text-[10px] text-muted-foreground font-medium">
-                        {hasContent ? "Ready to generate" : "Upload file or use message content"}
+                    <div>
+                        <div className="text-[10px] text-muted-foreground font-medium">
+                            {hasContent ? "Ready to generate" : "Upload file or use message content"}
+                        </div>
+                        {submitError && (
+                            <p className="text-[11px] text-red-400 mt-1">{submitError}</p>
+                        )}
                     </div>
                     <button
                         onClick={handleGenerate}
-                        disabled={!hasContent || isGenerating}
+                        disabled={!hasContent || isGenerating || isQuestionTypeLocked}
                         className={cn(
                             "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
-                            !hasContent || isGenerating
+                            !hasContent || isGenerating || isQuestionTypeLocked
                                 ? "opacity-50 cursor-not-allowed"
                                 : "hover:bg-primary/90 hover:scale-105"
                         )}

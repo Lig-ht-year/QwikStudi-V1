@@ -44,23 +44,16 @@ export default function SignupPage() {
 
         try {
             const normalizedEmail = email.trim().toLowerCase();
-            const emailPrefix = normalizedEmail.split("@")[0] || "";
-            const nameSlug = name
+            const username = name
                 .trim()
-                .toLowerCase()
                 .replace(/\s+/g, ".")
-                .replace(/[^a-z0-9._-]/g, "")
+                .replace(/[^A-Za-z0-9._-]/g, "")
                 .replace(/\.+/g, ".")
                 .replace(/^\.|\.$/g, "")
-                .slice(0, 30);
-            const emailSlug = emailPrefix
-                .toLowerCase()
-                .replace(/[^a-z0-9._-]/g, "")
-                .slice(0, 30);
-            const username = nameSlug || emailSlug;
+                .slice(0, 150);
 
             if (!username) {
-                setError("Please use an email with letters or numbers.");
+                setError("Please enter a valid username.");
                 setIsLoading(false);
                 return;
             }

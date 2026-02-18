@@ -63,8 +63,15 @@ export default function LoginPage() {
             window.location.href = "/";
         } catch (err: any) {
             console.error("Login error:", err);
-            const errorMsg = err.response?.data?.error || 
-                           err.response?.data?.detail || 
+            const fieldErrors = err.response?.data;
+            const usernameError = Array.isArray(fieldErrors?.username) ? fieldErrors.username[0] : null;
+            const passwordError = Array.isArray(fieldErrors?.password) ? fieldErrors.password[0] : null;
+            const nonFieldError = Array.isArray(fieldErrors?.non_field_errors) ? fieldErrors.non_field_errors[0] : null;
+            const errorMsg = err.response?.data?.error ||
+                           err.response?.data?.detail ||
+                           usernameError ||
+                           passwordError ||
+                           nonFieldError ||
                            "Login failed. Please check your credentials.";
             setError(errorMsg);
         } finally {

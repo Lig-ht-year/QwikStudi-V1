@@ -33,23 +33,43 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
     const [selectedVoice, setSelectedVoice] = useState("nova");
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [submitError, setSubmitError] = useState("");
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
     if (!isOpen) return null;
 
     const handleGenerate = async () => {
+        setSubmitError("");
         setIsGenerating(true);
         try {
             await onGenerate(text, selectedVoice, uploadedFile);
             onClose();
+        } catch (error: unknown) {
+            setSubmitError(error instanceof Error ? error.message : "Failed to generate audio.");
         } finally {
             setIsGenerating(false);
         }
     };
 
+    const validateFile = (file: File): boolean => {
+        if (file.size > MAX_FILE_SIZE) {
+            setSubmitError(`File too large. Maximum size is ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
+            return false;
+        }
+        const ext = file.name.toLowerCase().split(".").pop();
+        const validExtensions = ["txt", "pdf", "doc", "docx", "md"];
+        if (!ext || !validExtensions.includes(ext)) {
+            setSubmitError(`Unsupported file type. Allowed: ${validExtensions.join(", ")}.`);
+            return false;
+        }
+        setSubmitError("");
+        return true;
+    };
+
     const handleFileDrop = (e: React.DragEvent) => {
         e.preventDefault();
         const file = e.dataTransfer.files[0];
-        if (file) setUploadedFile(file);
+        if (file && validateFile(file)) setUploadedFile(file);
     };
 
     return (
@@ -128,9 +148,14 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                             <input
                                 id="tts-file-input"
                                 type="file"
-                                accept=".txt,.pdf,.doc,.docx"
+                                accept=".txt,.pdf,.doc,.docx,.md"
                                 className="hidden"
-                                onChange={(e) => e.target.files?.[0] && setUploadedFile(e.target.files[0])}
+                                onChange={(e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file && validateFile(file)) {
+                                        setUploadedFile(file);
+                                    }
+                                }}
                             />
                             <Upload className={cn("w-6 h-6", uploadedFile ? "text-primary" : "text-muted-foreground")} />
                             {uploadedFile ? (
@@ -179,8 +204,11 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
 
                 {/* Footer */}
                 <div className="p-4 border-t border-border/50 bg-muted/20 flex items-center justify-between">
-                    <div className="text-[10px] text-muted-foreground font-medium pl-1">
-                        {text.length > 0 ? `${text.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                    <div>
+                        <div className="text-[10px] text-muted-foreground font-medium pl-1">
+                            {text.length > 0 ? `${text.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                        </div>
+                        {submitError && <p className="text-xs text-red-400 mt-1">{submitError}</p>}
                     </div>
                     <button
                         onClick={handleGenerate}

@@ -186,12 +186,69 @@ class ChatListAPIView(APIView):
 
 @method_decorator(csrf_exempt, name='dispatch')
 class ChatAPIView(APIView):
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
     def post(self, request):
         user = request.user if request.user.is_authenticated else None
-        prompt = request.data.get("prompt")
+        raw_prompt = (request.data.get("prompt") or "").strip()
+        prompt = raw_prompt
         chat_id = request.data.get("chat_id")
         guest_id = request.data.get("guest_id")
         ip = get_client_ip(request)
+
+        uploaded_files = request.FILES.getlist("files") if hasattr(request, "FILES") else []
+        uploaded_file_descriptors = []
+
+        file_context_chunks = []
+        unsupported_files = []
+        unreadable_files = []
+        max_file_context_chars = 3000
+        remaining_chars = max_file_context_chars
+        allowed_file_exts = {"pdf", "txt", "doc", "docx", "md", "ppt", "pptx"}
+
+        for uploaded_file in uploaded_files:
+            file_ext = uploaded_file.name.lower().split(".")[-1] if "." in uploaded_file.name else ""
+            uploaded_file_descriptors.append({
+                "name": uploaded_file.name,
+                "size": int(getattr(uploaded_file, "size", 0) or 0),
+                "ext": file_ext,
+                "content_type": getattr(uploaded_file, "content_type", "") or "",
+            })
+            if remaining_chars <= 0:
+                break
+            if file_ext not in allowed_file_exts:
+                unsupported_files.append(uploaded_file.name)
+                continue
+            extracted = extract_text_from_file(uploaded_file)
+            if not extracted:
+                unreadable_files.append(uploaded_file.name)
+                continue
+            excerpt = extracted[:remaining_chars].strip()
+            if not excerpt:
+                unreadable_files.append(uploaded_file.name)
+                continue
+            file_context_chunks.append(f"[{uploaded_file.name}]\n{excerpt}")
+            remaining_chars -= len(excerpt)
+
+        if file_context_chunks:
+            combined_file_context = "\n\n".join(file_context_chunks)
+            prompt = (
+                f"{prompt}\n\nReference material from uploaded files:\n{combined_file_context}"
+                if prompt
+                else f"Use this uploaded study material to help me:\n{combined_file_context}"
+            )
+
+        if uploaded_files and not file_context_chunks and not prompt:
+            details = []
+            if unsupported_files:
+                details.append(
+                    f"Unsupported file type: {', '.join(unsupported_files)}. Allowed: {', '.join(sorted(allowed_file_exts))}."
+                )
+            if unreadable_files:
+                details.append(f"Could not extract readable text from: {', '.join(unreadable_files)}.")
+            if not details:
+                details.append("No usable text was found in the uploaded files.")
+            return Response({"error": " ".join(details)}, status=status.HTTP_400_BAD_REQUEST)
 
         logger.debug(f"[ChatAPI] Request received - user: {user}, prompt length: {len(prompt) if prompt else 0}, chat_id: {chat_id}, guest_id: {guest_id}")
         logger.debug(f"[ChatAPI] Request data: {dict(request.data)}")
@@ -357,14 +414,20 @@ Remember: Your goal is to help users become better learners, not just to answer 
         # Save chat history
         if user:
             try:
+                prompt_type = "attachment" if uploaded_files else "text"
+                prompt_metadata = {
+                    "caption": raw_prompt,
+                    "files": uploaded_file_descriptors,
+                } if uploaded_files else {}
                 ChatHistory.objects.create(
                     chat=chat,
                     user=user,
-                    prompt=prompt,
+                    prompt=raw_prompt,
                     response=bot_reply,
-                    prompt_type="text",
+                    prompt_type=prompt_type,
+                    prompt_metadata=prompt_metadata,
                     response_type="text",
-                    context="general"
+                    context="file" if uploaded_files else "general"
                 )
             except Exception as e:
                 logger.warning(f"[History Save Fail] {e}", exc_info=True)
@@ -379,7 +442,8 @@ Remember: Your goal is to help users become better learners, not just to answer 
         response_payload = {
             "chat_id": chat.id if chat else None,
             "response": bot_reply,
-            "limit_exceeded": False
+            "limit_exceeded": False,
+            "uploaded_files": uploaded_file_descriptors,
         }
         if not user:
             response_payload["guest_id"] = str(guest_uuid)

@@ -33,7 +33,7 @@ interface Message {
     id: string;
     role: 'user' | 'assistant';
     content: string;
-    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes';
+    type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes' | 'attachment';
     metadata?: Record<string, unknown>;
     createdAt: Date;
 }
@@ -82,7 +82,7 @@ interface ChatState {
     setActiveModal: (modal: 'tts' | 'stt' | 'quiz' | 'summarize' | 'upgrade' | 'deleteConfirm' | null) => void;
 
     // User (delegates to useDataStore)
-    username: string;
+    username: string | null;
     setUsername: (name: string) => void;
     profilePicture: string | null;
     setProfilePicture: (picture: string | null) => void;
@@ -106,7 +106,7 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>()(
     persist(
-        (set, get) => ({
+        (set) => ({
             // Messages - delegate to useDataStore
             get messages() { return useDataStore.getState().messages; },
             addMessage: (message) => {
