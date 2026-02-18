@@ -78,9 +78,9 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
 
         // Check file extension
         const ext = file.name.toLowerCase().split('.').pop();
-        const validExtensions = ['txt', 'pdf', 'doc', 'docx', 'ppt', 'pptx', 'jpg', 'jpeg', 'png'];
+        const validExtensions = ['txt', 'pdf', 'doc', 'docx', 'md'];
         if (!ext || !validExtensions.includes(ext)) {
-            showToast('Invalid file type. Please upload a document or image.', 'error');
+            showToast('Invalid file type. Please upload a supported document.', 'error');
             return false;
         }
 
@@ -90,10 +90,7 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
             'application/pdf',
             'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/vnd.ms-powerpoint',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'image/jpeg',
-            'image/png',
+            'text/markdown',
         ];
 
         if (file.type && !validMimeTypes.includes(file.type)) {
@@ -198,7 +195,7 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                             <input
                                 id="quiz-file-input"
                                 type="file"
-                                accept=".txt,.pdf,.doc,.docx,.ppt,.pptx,image/*"
+                                accept=".txt,.pdf,.doc,.docx,.md"
                                 className="hidden"
                                 onChange={(e) => {
                                     const file = e.target.files?.[0];

@@ -110,17 +110,27 @@ export default function Home() {
         setChatId(firstSession.chatId ?? null);
     }, [activeSessionId, sessions, setActiveSessionId, setChatId]);
 
-    const handleTTSGenerate = async (text: string, voice: string) => {
+    const handleTTSGenerate = async (text: string, voice: string, file?: File | null) => {
         if (!requireAuthForFeature()) return;
         const loadingId = addLoadingAssistantMessage("Converting your text into audio...");
 
         try {
             const resolvedChatId = await ensureChatId();
-            const res = await api.post("/chat/audio/generate/", {
-                text,
-                voice,
-                chat_id: resolvedChatId,
-            });
+            let res;
+
+            if (file) {
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("voice", voice);
+                if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
+                res = await api.post("/chat/audio/generate/", formData);
+            } else {
+                res = await api.post("/chat/audio/generate/", {
+                    text,
+                    voice,
+                    chat_id: resolvedChatId,
+                });
+            }
 
             removeMessage(loadingId);
 
@@ -134,7 +144,7 @@ export default function Home() {
                     title: "Generated Audio",
                     audio_url: res.data?.audio_url,
                     voice,
-                    transcript: text,
+                    transcript: text || (file ? `Source file: ${file.name}` : ""),
                 },
                 createdAt: new Date(),
             });
@@ -184,9 +194,7 @@ export default function Home() {
             if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
             if (durationMs) formData.append("duration_ms", String(durationMs));
 
-            const res = await api.post("/transcribe/", formData, {
-                headers: { 'Content-Type': 'multipart/form-data' },
-            });
+            const res = await api.post("/transcribe/", formData);
 
             removeMessage(loadingId);
 
@@ -247,9 +255,7 @@ export default function Home() {
             const resolvedChatId = await ensureChatId();
             if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
-            const res = await api.post("/chat/quiz/generate/", formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
+            const res = await api.post("/chat/quiz/generate/", formData);
 
             // Replace loading message with actual quiz
             removeMessage(loadingId);
@@ -304,9 +310,7 @@ export default function Home() {
             const resolvedChatId = await ensureChatId();
             if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
-            const res = await api.post("/chat/summarize/", formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
+            const res = await api.post("/chat/summarize/", formData);
 
             // Replace loading message with actual summary
             removeMessage(loadingId);

@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 interface TTSModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onGenerate: (text: string, voice: string) => Promise<void> | void;
+    onGenerate: (text: string, voice: string, file?: File | null) => Promise<void> | void;
 }
 
 const voices = [
@@ -39,7 +39,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
     const handleGenerate = async () => {
         setIsGenerating(true);
         try {
-            await onGenerate(text, selectedVoice);
+            await onGenerate(text, selectedVoice, uploadedFile);
             onClose();
         } finally {
             setIsGenerating(false);

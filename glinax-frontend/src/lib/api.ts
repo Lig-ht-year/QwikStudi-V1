@@ -11,9 +11,20 @@ const api = axios.create({
   },
 });
 
+function isPublicAuthEndpoint(url?: string): boolean {
+  if (!url) return false;
+  const normalized = url.toLowerCase();
+  return (
+    normalized.includes("/auth/login/") ||
+    normalized.includes("/auth/register/") ||
+    normalized.includes("/auth/refresh/")
+  );
+}
+
 // 🔐 Add Authorization header if access token exists
 api.interceptors.request.use((config) => {
   if (typeof window === "undefined") return config;
+  if (isPublicAuthEndpoint(config.url)) return config;
   const access = localStorage.getItem("access");
   if (access) {
     config.headers = config.headers || {};
@@ -27,10 +38,16 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+    const requestUrl = originalRequest?.url as string | undefined;
+
+    if (isPublicAuthEndpoint(requestUrl)) {
+      return Promise.reject(error);
+    }
 
     // If 401 and refresh token available
     if (
       error.response?.status === 401 &&
+      originalRequest &&
       !originalRequest._retry &&
       localStorage.getItem("refresh")
     ) {
@@ -38,7 +55,7 @@ api.interceptors.response.use(
 
       try {
         const res = await axios.post(
-          `${apiBaseUrl}/auth/token/refresh/`, {
+          `${apiBaseUrl}/auth/refresh/`, {
           refresh: localStorage.getItem("refresh"),
         });
 
@@ -48,7 +65,7 @@ api.interceptors.response.use(
         // Retry original request with new access
         originalRequest.headers.Authorization = `Bearer ${newAccess}`;
         return api(originalRequest);
-      } catch (refreshErr) {
+      } catch {
         // Refresh failed → force logout
         useDataStore.getState().logout();
         window.location.href = "/login";

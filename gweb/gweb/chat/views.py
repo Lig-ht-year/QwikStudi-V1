@@ -14,6 +14,7 @@ from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.generics import RetrieveAPIView
 from django.http import FileResponse
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from openai import OpenAI
 
@@ -705,9 +706,14 @@ class RejectCollaborationAPIView(APIView):
 
 class TextToAudioView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     
     def post(self, request):
         text = request.data.get('text')
+        if not text and 'file' in request.FILES:
+            text = extract_text_from_file(request.FILES['file'])
+        if isinstance(text, str):
+            text = text.strip()
         if not text:
             return Response({"error": "No text provided"}, status=400)
         chat_id = request.data.get("chat_id")

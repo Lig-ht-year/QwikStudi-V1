@@ -187,8 +187,6 @@ export function ChatContainer() {
 
     // Load messages when a session is selected
     useEffect(() => {
-        if (isLoading) return;
-
         let isMounted = true;
 
         const loadSessionMessages = async () => {
@@ -247,7 +245,7 @@ export function ChatContainer() {
         return () => {
             isMounted = false;
         };
-    }, [activeSessionId, chatId, isLoading]);
+    }, [activeSessionId, chatId]);
 
     useEffect(() => {
         if (scrollRef.current) {
