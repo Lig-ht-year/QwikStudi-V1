@@ -16,26 +16,53 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from datetime import timedelta
 from uuid import uuid4
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
 # Frontend callback URL for payment completion
 FRONTEND_CALLBACK_URL = getattr(settings, 'FRONTEND_CALLBACK_URL', 'http://localhost:3000/payment/callback')
 
+PLAN_CONFIG = {
+    "monthly": {
+        "amount_pesewas": 3000,  # 30.00 GHS
+        "amount_ghs": Decimal("30.00"),
+        "duration_days": 30,
+        "label": "Monthly",
+    },
+    "annual": {
+        "amount_pesewas": 30000,  # 300.00 GHS
+        "amount_ghs": Decimal("300.00"),
+        "duration_days": 365,
+        "label": "Annual",
+    },
+}
+
 # ========== PAYMENT VIEWS ==========
 
-def _extend_premium(user, paid_date):
+def _extend_premium(user, paid_date, duration_days=30):
     profile, _ = UserProfile.objects.get_or_create(user=user)
     today = paid_date
     if profile.premium_expiry and profile.premium_expiry >= today:
-        profile.premium_expiry = profile.premium_expiry + timedelta(days=30)
+        profile.premium_expiry = profile.premium_expiry + timedelta(days=duration_days)
     else:
-        profile.premium_expiry = today + timedelta(days=30)
+        profile.premium_expiry = today + timedelta(days=duration_days)
     profile.is_premium = True
     profile.save()
     return profile
 
-def _initiate_paystack(user, reference):
+def _resolve_plan_metadata(paystack_data):
+    metadata = paystack_data.get("metadata") or {}
+    billing_cycle = metadata.get("billing_cycle")
+    if billing_cycle in PLAN_CONFIG:
+        return billing_cycle, PLAN_CONFIG[billing_cycle]["duration_days"]
+
+    amount_ghs = Decimal(str(paystack_data.get("amount", 0))) / 100
+    if amount_ghs >= PLAN_CONFIG["annual"]["amount_ghs"]:
+        return "annual", PLAN_CONFIG["annual"]["duration_days"]
+    return "monthly", PLAN_CONFIG["monthly"]["duration_days"]
+
+def _initiate_paystack(user, reference, plan, plan_key):
     return requests.post(
         "https://api.paystack.co/transaction/initialize",
         headers={
@@ -44,16 +71,17 @@ def _initiate_paystack(user, reference):
         },
         json={
             "email": user.email,
-            "amount": "3000",  # 30.00 GHS
+            "amount": str(plan["amount_pesewas"]),
             "currency": "GHS",
             "reference": reference,
             "callback_url": settings.FRONTEND_CALLBACK_URL,
             "metadata": {
                 "user_id": user.id,
+                "billing_cycle": plan_key,
                 "custom_fields": [{
                     "display_name": "Payment For",
                     "variable_name": "payment_for",
-                    "value": "Premium Upgrade"
+                    "value": f"Premium Upgrade ({plan['label']})"
                 }]
             }
         },
@@ -74,21 +102,30 @@ def initiate_payment_api(request):
         if profile and profile.is_premium and profile.premium_expiry and profile.premium_expiry >= timezone.now().date():
             return JsonResponse({"error": "You already have a premium account"}, status=400)
 
+        payload = getattr(request, "data", {}) or {}
+        if not hasattr(payload, "get"):
+            payload = {}
+        plan_key = payload.get("plan", "monthly")
+        if plan_key not in PLAN_CONFIG:
+            return JsonResponse({"error": "Invalid plan. Use 'monthly' or 'annual'."}, status=400)
+        plan = PLAN_CONFIG[plan_key]
+
         reference = f"pay_{uuid4().hex}"
         UserPayment.objects.create(
             user=request.user,
             paystack_reference=reference,
-            amount=30.00,
+            amount=plan["amount_ghs"],
             currency="GHS",
             status="pending",
         )
 
-        response = _initiate_paystack(request.user, reference)
+        response = _initiate_paystack(request.user, reference, plan, plan_key)
 
         if response.status_code == 200:
             return JsonResponse({
                 "authorization_url": response.json()['data']['authorization_url'],
                 "reference": reference,
+                "plan": plan_key,
             })
         else:
             error_data = response.json()
@@ -121,6 +158,7 @@ def verify_payment(request):
         if response.status_code == 200:
             data = response.json()
             if data['data']['status'] == 'success':
+                _, duration_days = _resolve_plan_metadata(data["data"])
                 UserPayment.objects.update_or_create(
                     paystack_reference=reference,
                     defaults={
@@ -133,7 +171,7 @@ def verify_payment(request):
                         "raw_response": data,
                     },
                 )
-                _extend_premium(request.user, timezone.now().date())
+                _extend_premium(request.user, timezone.now().date(), duration_days=duration_days)
                 return redirect(f"{FRONTEND_CALLBACK_URL}?reference={reference}&status=success")
 
     except requests.exceptions.RequestException as e:
@@ -170,6 +208,7 @@ def paystack_webhook(request):
             if not UserPayment.objects.filter(paystack_reference=reference).exists():
                 with transaction.atomic():
                     user = User.objects.get(id=data['metadata']['user_id'])
+                    _, duration_days = _resolve_plan_metadata(data)
                     UserPayment.objects.update_or_create(
                         paystack_reference=reference,
                         defaults={
@@ -182,7 +221,7 @@ def paystack_webhook(request):
                             "raw_response": payload,
                         },
                     )
-                    _extend_premium(user, timezone.now().date())
+                    _extend_premium(user, timezone.now().date(), duration_days=duration_days)
     except Exception as e:
         logger.error(f"Webhook processing failed: {e}")
         return JsonResponse({"status": "failed"}, status=400)

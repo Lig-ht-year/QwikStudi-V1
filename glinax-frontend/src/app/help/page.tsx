@@ -52,7 +52,7 @@ const faqs: FAQItem[] = [
     },
     {
         question: "What's the difference between Free and Pro plans?",
-        answer: "Free plan includes limited AI messages per day and basic features. Pro plan (GHS 30/month) offers unlimited messages, priority response times, advanced summarization, unlimited quiz generation, premium voices, and priority support."
+        answer: "Free plan includes limited AI messages per day and basic features. Pro plan offers monthly billing at GHS 30/month or annual billing at GHS 300/year (save about 17% vs GHS 360/year billed monthly), plus unlimited messages, priority response times, advanced summarization, unlimited quiz generation, premium voices, and priority support."
     },
     {
         question: "How do I upgrade to Pro?",

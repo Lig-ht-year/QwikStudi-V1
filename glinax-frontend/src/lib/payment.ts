@@ -4,11 +4,14 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
  * Payment API utilities for Paystack integration
  */
 
+export type BillingPlan = 'monthly' | 'annual';
+
 /**
  * Initiate a payment with Paystack
+ * @param plan - Selected billing plan
  * @returns The authorization URL to redirect the user to
  */
-export async function initiatePayment(): Promise<{ authorization_url: string; reference: string }> {
+export async function initiatePayment(plan: BillingPlan = 'monthly'): Promise<{ authorization_url: string; reference: string }> {
     const access = localStorage.getItem('access');
     
     if (!access) {
@@ -21,6 +24,7 @@ export async function initiatePayment(): Promise<{ authorization_url: string; re
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${access}`,
         },
+        body: JSON.stringify({ plan }),
     });
 
     if (!response.ok) {

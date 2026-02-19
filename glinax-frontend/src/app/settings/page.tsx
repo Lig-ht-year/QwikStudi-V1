@@ -34,7 +34,7 @@ import { useDataStore, Language } from "@/stores/dataStore";
 import { useUIStore } from "@/stores/uiStore";
 import { translations } from "@/lib/translations";
 import { useToast } from "@/components/Toast";
-import { initiatePayment } from "@/lib/payment";
+import { BillingPlan, initiatePayment } from "@/lib/payment";
 
 interface SettingItemProps {
     icon: React.ReactNode;
@@ -224,12 +224,18 @@ function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose
     const language = useDataStore((state) => state.language);
     const t = translations[language];
     const [isProcessing, setIsProcessing] = useState(false);
+    const [selectedPlan, setSelectedPlan] = useState<BillingPlan>("annual");
+
+    const monthlyPrice = 30;
+    const annualPrice = 300;
+    const annualEquivalent = monthlyPrice * 12;
+    const savingsPercent = Math.round(((annualEquivalent - annualPrice) / annualEquivalent) * 100);
 
     const handleUpgrade = async () => {
         setIsProcessing(true);
         try {
             // Initiate payment with Paystack
-            const { authorization_url } = await initiatePayment();
+            const { authorization_url } = await initiatePayment(selectedPlan);
             
             // Redirect to Paystack checkout
             window.location.href = authorization_url;
@@ -258,10 +264,58 @@ function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose
                         {t.upgradeDescription}
                     </p>
 
-                    <div className="bg-white/5 rounded-2xl p-6 mb-6">
-                        <div className="flex items-baseline justify-center gap-1 mb-4">
-                            <span className="text-4xl font-bold">GHS 30</span>
-                            <span className="text-muted-foreground">/month</span>
+                    <div className="bg-white/5 rounded-2xl p-4 mb-6 space-y-3">
+                        <button
+                            type="button"
+                            onClick={() => setSelectedPlan("monthly")}
+                            className={cn(
+                                "w-full text-left rounded-xl border p-4 transition-colors",
+                                selectedPlan === "monthly"
+                                    ? "border-primary bg-primary/10"
+                                    : "border-white/10 hover:border-white/20"
+                            )}
+                        >
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="font-semibold">Monthly Pro</p>
+                                    <p className="text-sm text-muted-foreground">GHS 30/month</p>
+                                </div>
+                                {selectedPlan === "monthly" && <Check className="w-5 h-5 text-primary" />}
+                            </div>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setSelectedPlan("annual")}
+                            className={cn(
+                                "w-full text-left rounded-xl border p-4 transition-colors",
+                                selectedPlan === "annual"
+                                    ? "border-primary bg-primary/10"
+                                    : "border-white/10 hover:border-white/20"
+                            )}
+                        >
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="font-semibold">Annual Pro</p>
+                                    <p className="text-sm text-muted-foreground">GHS 300/year</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs px-2 py-1 rounded-full bg-primary/20 text-primary font-semibold">
+                                        Save {savingsPercent}%
+                                    </span>
+                                    {selectedPlan === "annual" && <Check className="w-5 h-5 text-primary" />}
+                                </div>
+                            </div>
+                            <p className="text-xs text-muted-foreground mt-2">
+                                That is GHS {annualEquivalent}/year if billed monthly.
+                            </p>
+                        </button>
+                        <div className="flex items-baseline justify-center gap-1 pt-1">
+                            <span className="text-3xl font-bold">
+                                {selectedPlan === "annual" ? "GHS 300" : "GHS 30"}
+                            </span>
+                            <span className="text-muted-foreground">
+                                {selectedPlan === "annual" ? "/year" : "/month"}
+                            </span>
                         </div>
                         <ul className="space-y-3 text-left">
                             {[
@@ -291,7 +345,7 @@ function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose
                                 <span>Processing...</span>
                             </>
                         ) : (
-                            t.subscribe
+                            `${t.subscribe} (${selectedPlan === "annual" ? "GHS 300/yr" : "GHS 30/mo"})`
                         )}
                     </button>
                     <button
@@ -523,7 +577,7 @@ export default function SettingsPage() {
                                 <div className="flex-1">
                                     <p className="font-semibold text-foreground">Upgrade to Pro</p>
                                     <p className="text-sm text-muted-foreground mt-0.5">
-                                        GHS 30/month for unlimited messages and premium features.
+                                        GHS 30/month or GHS 300/year (save 17%) for unlimited premium features.
                                     </p>
                                 </div>
                                 <button

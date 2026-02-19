@@ -119,7 +119,9 @@ CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in debug mode
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://qwikstudi.onrender.com",
+    "https://qwikstudi.com",
+    "https://www.qwikstudi.com",
+    "https://glinax-frontend.onrender.com",
 ]
 # Add from environment variable if provided
 env_origins = os.getenv('CORS_ALLOWED_ORIGINS', '')
