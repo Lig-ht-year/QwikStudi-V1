@@ -71,7 +71,14 @@ def _sanitize_response_text(text: str) -> str:
     cleaned = re.sub(r"_\{([^}]*)\}", r"_(\1)", cleaned)
     cleaned = re.sub(r"\^\{([^}]*)\}", r"^(\1)", cleaned)
     cleaned = cleaned.replace("{", "").replace("}", "")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Preserve readable structure: keep line breaks, normalize spacing per line.
+    lines = []
+    for line in cleaned.splitlines():
+        compact = re.sub(r"[ \t]+", " ", line).strip()
+        lines.append(compact)
+    cleaned = "\n".join(lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
 
 def _get_chat_for_write(user, chat_id):
@@ -827,6 +834,43 @@ class ListCollaboratorsAPIView(APIView):
         data.insert(0, owner_data)
 
         return Response(data, status=200)
+
+
+class GuestChatStatusAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        guest_id = request.query_params.get("guest_id")
+        ip = get_client_ip(request)
+
+        guest_count = 0
+        ip_count = 0
+
+        if guest_id:
+            try:
+                guest_uuid = UUID(str(guest_id))
+                guest_tracker = GuestChatTracker.objects.filter(guest_id=guest_uuid).first()
+                guest_count = guest_tracker.count if guest_tracker else 0
+            except (ValueError, TypeError):
+                guest_count = 0
+
+        ip_tracker = GuestIPTracker.objects.filter(ip_address=ip).first()
+        ip_count = ip_tracker.count if ip_tracker else 0
+
+        limit = 10
+        limit_exceeded = guest_count >= limit or ip_count >= limit
+        remaining = max(0, limit - max(guest_count, ip_count))
+
+        return Response(
+            {
+                "limit_exceeded": limit_exceeded,
+                "remaining": remaining,
+                "message": "You've reached your guest chat limit. Please log in to continue."
+                if limit_exceeded
+                else "",
+            },
+            status=200,
+        )
 
 
 class PendingCollaborationsAPIView(APIView):
@@ -1613,6 +1657,7 @@ Requirements:
 - {key_terms_instruction}
 - Make it easy to study from
 - Highlight important concepts
+- Do not use LaTeX or math markup. Write equations in plain readable form (e.g., F = ma, 6CO2 + 6H2O -> C6H12O6 + 6O2).
 
 Return the response as a JSON object with this structure:
 {{

@@ -216,6 +216,28 @@ export function ChatInput() {
         const guestId = Cookies.get("guest_id");
         const now = new Date();
 
+        // Guest preflight: if limit is exhausted, block immediately without showing typing/loading.
+        if (!isLoggedIn && guestId) {
+            try {
+                const statusRes = await api.get("/chat/guest/status/", {
+                    params: { guest_id: guestId },
+                });
+                if (statusRes.data?.limit_exceeded) {
+                    setIsLimitExceeded(true);
+                    setLimitMessage(
+                        String(
+                            statusRes.data?.message ||
+                            "You've reached your guest chat limit. Please log in to continue."
+                        )
+                    );
+                    showToast("Guest limit reached. Log in to continue.", "info");
+                    return;
+                }
+            } catch {
+                // Non-blocking: if preflight fails, proceed with normal send flow.
+            }
+        }
+
         // Add user message immediately
         if (hasFiles) {
             addMessage({

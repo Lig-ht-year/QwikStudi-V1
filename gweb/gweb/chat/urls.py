@@ -6,12 +6,14 @@ from .views import (
     ChatDetailView, EmailShareAPIView,
     ListCollaboratorsAPIView, ApproveCollaborationAPIView,
     PendingCollaborationsAPIView, ListUsersAPIView, RejectCollaborationAPIView,
-    TextToAudioView, AudioFileByIdView, QuizGenerateAPIView, QuizGradeTextAPIView, SummarizeAPIView
+    TextToAudioView, AudioFileByIdView, QuizGenerateAPIView, QuizGradeTextAPIView, SummarizeAPIView,
+    GuestChatStatusAPIView
 
 )
 
 urlpatterns = [
     path('', ChatAPIView.as_view(), name='chat'),
+    path('guest/status/', GuestChatStatusAPIView.as_view(), name='chat-guest-status'),
     path('commit/', CommitChatView.as_view(), name='chat-commit'),
     path('list/', ChatListAPIView.as_view(), name='chat-list'),
     path('start/', StartNewChatAPIView.as_view(), name='chat-start'),

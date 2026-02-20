@@ -39,6 +39,11 @@ export const metadata: Metadata = {
         title: "QwikStudi | AI-Powered Study Assistant",
         description: "Transform your studying with AI. Generate quizzes, summarize documents, and learn smarter.",
     },
+    icons: {
+        icon: "/icon.svg",
+        shortcut: "/icon.svg",
+        apple: "/icon.svg",
+    },
 };
 
 export const viewport = {
@@ -76,4 +81,3 @@ export default function RootLayout({
         </html>
     );
 }
-

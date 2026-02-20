@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="QwikStudi icon">
+  <defs>
+    <linearGradient id="qgrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#28AAFF"/>
+      <stop offset="55%" stop-color="#1689F6"/>
+      <stop offset="100%" stop-color="#0A5FDF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ring -->
+  <circle cx="246" cy="246" r="190" fill="none" stroke="url(#qgrad)" stroke-width="78" stroke-linecap="round"/>
+
+  <!-- Tail -->
+  <path d="M270 290 L430 450" fill="none" stroke="url(#qgrad)" stroke-width="78" stroke-linecap="round"/>
+</svg>
