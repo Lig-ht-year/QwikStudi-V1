@@ -386,7 +386,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             </div>
                             {isSidebarOpen && (
                                 <div className="flex-1 overflow-hidden">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-foreground truncate">
+                                    <p className="text-xs font-semibold tracking-wide text-foreground truncate">
                                         {formatDisplayName(username, 'Guest')}
                                     </p>
                                     {plan === 'pro' ? (

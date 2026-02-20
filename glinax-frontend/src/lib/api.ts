@@ -14,6 +14,7 @@ function isPublicAuthEndpoint(url?: string): boolean {
   return (
     normalized.includes("/auth/login/") ||
     normalized.includes("/auth/register/") ||
+    normalized.includes("/auth/google/") ||
     normalized.includes("/auth/refresh/")
   );
 }

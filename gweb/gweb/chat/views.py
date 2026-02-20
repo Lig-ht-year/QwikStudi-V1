@@ -173,6 +173,38 @@ def _auto_title_feature_chat(chat: Chat | None, source_name: str, suffix: str) -
     chat.save()
     return chat.title
 
+
+def _is_smalltalk_prompt(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if not normalized:
+        return True
+    if len(normalized) <= 40 and re.fullmatch(r"(hi|hey|hello|yo|sup|thanks|thank you)[!. ]*", normalized):
+        return True
+    smalltalk_patterns = [
+        r"\b(good morning|good afternoon|good evening)\b",
+        r"\b(how are you|how's it going|what's up)\b",
+        r"\b(can you help|help me|assist me)\b",
+        r"\b(hello there|hey there)\b",
+    ]
+    return any(re.search(pattern, normalized) for pattern in smalltalk_patterns)
+
+
+def _is_substantive_prompt(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    if not normalized:
+        return False
+    words = re.findall(r"[A-Za-z0-9']+", normalized)
+    if len(words) < 5 or len(normalized) < 24:
+        return False
+    return not _is_smalltalk_prompt(normalized)
+
+
+def _looks_provisional_chat_title(title: str) -> bool:
+    normalized = str(title or "").strip().lower()
+    if _is_default_chat_title(normalized):
+        return True
+    return any(token in normalized for token in ["greeting", "assist", "hello", "new chat"])
+
 class AddCollaboratorAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -616,23 +648,62 @@ class CommitChatView(APIView):
         if not is_owner and not has_edit_access:
             return Response({"error": "You do not have permission to modify this chat."}, status=403)
 
-        messages = list(ChatHistory.objects.filter(chat=chat).order_by("created_at")[:2])
-
-        if len(messages) < 2:
+        history = list(ChatHistory.objects.filter(chat=chat).order_by("created_at")[:6])
+        if not history:
             return Response(
-                {"error": "At least two messages are required to generate a title."},
+                {"error": "At least one message is required to generate a title."},
                 status=400
             )
 
-        title = generate_chat_title_from_openai([
-            {"role": "user", "content": messages[0].prompt},
-            {"role": "assistant", "content": messages[0].response}
-        ]) or "New Chat"
+        seed_pair = None
+        has_substantive_prompt = False
+        for item in history:
+            prompt = str(item.prompt or "").strip()
+            if not prompt:
+                continue
+            if _is_substantive_prompt(prompt):
+                has_substantive_prompt = True
+                seed_pair = item
+                break
+            if seed_pair is None:
+                seed_pair = item
 
-        chat.title = title
-        chat.save()
+        if seed_pair is None:
+            seed_pair = history[0]
 
-        return Response({"chat_id": chat.id, "title": title}, status=200)
+        conversation = []
+        prompt_text = str(seed_pair.prompt or "").strip()
+        response_text = str(seed_pair.response or "").strip()
+        if prompt_text:
+            conversation.append({"role": "user", "content": prompt_text})
+        if response_text:
+            conversation.append({"role": "assistant", "content": response_text})
+
+        if not conversation:
+            return Response(
+                {"error": "No usable message content found to generate a title."},
+                status=400
+            )
+
+        title = generate_chat_title_from_openai(conversation) or "New Chat"
+
+        first_prompt = str(history[0].prompt or "").strip()
+        first_prompt_snippet = (
+            f"{first_prompt[:60].rstrip()}..." if len(first_prompt) > 60 else first_prompt
+        )
+        current_title = str(chat.title or "").strip()
+        history_count = ChatHistory.objects.filter(chat=chat).count()
+        should_replace = (
+            _is_default_chat_title(current_title)
+            or (first_prompt_snippet and current_title.lower() == first_prompt_snippet.lower())
+            or (_looks_provisional_chat_title(current_title) and has_substantive_prompt and history_count <= 8)
+        )
+
+        if should_replace:
+            chat.title = title
+            chat.save(update_fields=["title", "updated_at"])
+
+        return Response({"chat_id": chat.id, "title": chat.title}, status=200)
 
 
 from rest_framework.views import APIView
@@ -1121,6 +1192,61 @@ def _normalize_quiz_options(options) -> list[str]:
     return cleaned
 
 
+def _normalize_option_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _pick_option_from_hint(options: list[str], hint: str) -> int | None:
+    normalized_hint = _normalize_option_text(hint)
+    if not normalized_hint:
+        return None
+
+    best_idx = None
+    best_score = 0
+    for idx, opt in enumerate(options):
+        normalized_opt = _normalize_option_text(opt)
+        if not normalized_opt:
+            continue
+        if normalized_opt == normalized_hint:
+            return idx
+        if normalized_opt in normalized_hint:
+            score = len(normalized_opt)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+    return best_idx
+
+
+def _resolve_mcq_correct_index(raw_correct, options: list[str], correct_text: str, explanation: str) -> int:
+    option_count = len(options)
+    if option_count == 0:
+        return 0
+
+    hint_match = _pick_option_from_hint(options, correct_text)
+    if hint_match is None:
+        hint_match = _pick_option_from_hint(options, explanation)
+    if hint_match is not None:
+        return hint_match
+
+    if isinstance(raw_correct, str):
+        token = raw_correct.strip().upper()
+        letter_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+        if token in letter_map and letter_map[token] < option_count:
+            return letter_map[token]
+        if token.isdigit():
+            raw_correct = int(token)
+
+    if isinstance(raw_correct, int):
+        # Preferred format is 0-based index.
+        if 0 <= raw_correct < option_count:
+            return raw_correct
+        # Tolerate 1-based index from model drift.
+        if 1 <= raw_correct <= option_count:
+            return raw_correct - 1
+
+    return 0
+
+
 def _infer_question_concept(question_text: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9\s]", " ", str(question_text or "")).lower()
     tokens = [t for t in text.split() if len(t) > 3]
@@ -1411,12 +1537,13 @@ Only return valid JSON, nothing else.
                     # Handle options based on question type
                     if question_type == "mcq":
                         normalized_q["options"] = _normalize_quiz_options(q.get("options", []))
-                        
-                        # Ensure correctAnswer is valid index
-                        if isinstance(q.get("correctAnswer"), int):
-                            normalized_q["correctAnswer"] = min(max(q["correctAnswer"], 0), len(normalized_q["options"]) - 1)
-                        else:
-                            normalized_q["correctAnswer"] = 0
+
+                        normalized_q["correctAnswer"] = _resolve_mcq_correct_index(
+                            q.get("correctAnswer"),
+                            normalized_q["options"],
+                            normalized_q["correctText"],
+                            normalized_q["explanation"],
+                        )
                         if not normalized_q["correctText"] and normalized_q["options"]:
                             normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
                     

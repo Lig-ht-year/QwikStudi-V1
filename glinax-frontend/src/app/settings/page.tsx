@@ -448,6 +448,7 @@ function LanguageModal({ isOpen, onClose, currentLanguage, onSelect }: { isOpen:
 }
 
 export default function SettingsPage() {
+    const hasHydrated = useDataStore((state) => state.hasHydrated);
     const {
         username,
         profilePicture,
@@ -468,6 +469,10 @@ export default function SettingsPage() {
     const language = useDataStore((state) => state.language);
     const setLanguage = useDataStore((state) => state.setLanguage);
     const t = translations[language];
+
+    if (!hasHydrated) {
+        return <div className="min-h-screen bg-background" />;
+    }
 
     const displayUsername = formatDisplayName(username, t.guest);
     const [notifications, setNotifications] = useState(true);

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { nanoid } from 'nanoid';
+import { formatDisplayName } from '@/lib/utils';
 
 /**
  * Data Store - Handles persistent user data
@@ -126,6 +127,12 @@ const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
     improveAI: true,
 };
 
+const normalizeUsername = (value: string | null | undefined): string | null => {
+    const input = value?.trim();
+    if (!input) return null;
+    return formatDisplayName(input, "Guest");
+};
+
 export const useDataStore = create<DataState>()(
     persist(
         (set, get) => ({
@@ -135,10 +142,11 @@ export const useDataStore = create<DataState>()(
             // Authentication
             isLoggedIn: false,
             login: (username) => set((state) => {
-                const shouldReset = !state.isLoggedIn || state.username !== username;
+                const normalizedUsername = normalizeUsername(username);
+                const shouldReset = !state.isLoggedIn || state.username !== normalizedUsername;
                 return {
                     isLoggedIn: true,
-                    username,
+                    username: normalizedUsername,
                     ...(shouldReset
                         ? {
                             profilePicture: null,
@@ -198,11 +206,11 @@ export const useDataStore = create<DataState>()(
                 }
                 set((state) => ({
                     isLoggedIn: true,
-                    username: storedUsername ?? state.username,
+                    username: normalizeUsername(storedUsername ?? state.username),
                 }));
             },
             setAuthUser: (user) => set((state) => {
-                const nextUsername = user?.username ?? null;
+                const nextUsername = normalizeUsername(user?.username ?? null);
                 const shouldReset = !state.isLoggedIn || state.username !== nextUsername;
                 return {
                     isLoggedIn: true,
@@ -332,7 +340,7 @@ export const useDataStore = create<DataState>()(
 
             // User
             username: null,
-            setUsername: (username) => set({ username }),
+            setUsername: (username) => set({ username: normalizeUsername(username) }),
             profilePicture: null,
             setProfilePicture: (profilePicture) => set({ profilePicture }),
 

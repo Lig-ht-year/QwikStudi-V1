@@ -72,6 +72,15 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
     const attachmentFiles = Array.isArray((metadata as { files?: unknown[] } | undefined)?.files)
         ? ((metadata as { files?: Array<{ name?: string; size?: number; ext?: string }> }).files || [])
         : [];
+    const createdAtIso = (() => {
+        try {
+            if (createdAt instanceof Date) return createdAt.toISOString();
+            const parsed = new Date(createdAt as unknown as string);
+            return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+        } catch {
+            return undefined;
+        }
+    })();
 
     const formatFileSize = (bytes?: number) => {
         if (!bytes || bytes <= 0) return "";
@@ -160,7 +169,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
         return (
             <div
                 className="w-full flex justify-end mb-6 animate-in fade-in slide-in-from-bottom-2 duration-300"
-                data-created-at={createdAt.toISOString()}
+                data-created-at={createdAtIso}
             >
                 <div className="max-w-[85%] sm:max-w-[70%]">
                     <div className="bg-card/80 backdrop-blur-sm border border-white/10 rounded-2xl p-4 shadow-lg">
@@ -200,7 +209,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
     return (
         <div
             className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300 group"
-            data-created-at={createdAt.toISOString()}
+            data-created-at={createdAtIso}
         >
             {/* AI Header with Q Icon */}
             <div className="flex items-center gap-2 mb-3">

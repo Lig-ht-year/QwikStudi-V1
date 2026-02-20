@@ -47,6 +47,7 @@ TITLE_OPENAI_MODEL = os.getenv("TITLE_OPENAI_MODEL", "gpt-4o-mini")
 QUIZ_OPENAI_MODEL = os.getenv("QUIZ_OPENAI_MODEL", "gpt-4o-mini")
 SUMMARY_OPENAI_MODEL = os.getenv("SUMMARY_OPENAI_MODEL", "gpt-4o-mini")
 TTS_OPENAI_MODEL = os.getenv("TTS_OPENAI_MODEL", "gpt-4o-mini-tts")
+GOOGLE_WEB_CLIENT_ID = os.getenv("GOOGLE_WEB_CLIENT_ID", "")
 
 def _normalize_host(value: str) -> str:
     host = value.strip()

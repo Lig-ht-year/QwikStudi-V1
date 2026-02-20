@@ -342,27 +342,20 @@ export function ChatInput() {
                 });
             }
 
-            // Auto-generate title after 2+ message pairs (4 messages total)
-            const messages = useDataStore.getState().messages;
-            const commitChatId = responseChatId ?? useDataStore.getState().chatId;
-            if (commitChatId && messages.length >= 4) {
-                const recentMessages = messages.slice(-4).map(m => ({
-                    prompt: m.role === 'user' ? m.content : '',
-                    response: m.role === 'assistant' ? m.content : ''
-                })).filter(m => m.prompt || m.response);
-                
-                if (recentMessages.length >= 2) {
-                    commitChat(Number(commitChatId), recentMessages)
-                        .then((result) => {
-                            if (result?.title) {
-                                updateSessionByChatId(Number(commitChatId), {
-                                    title: result.title,
-                                    lastMessageAt: new Date(),
-                                });
-                            }
-                        })
-                        .catch(console.error);
-                }
+            // Auto-generate title from normal chat flow as soon as the first exchange exists.
+            const latestAfterReply = useDataStore.getState();
+            const commitChatId = responseChatId ?? latestAfterReply.chatId;
+            if (commitChatId) {
+                commitChat(Number(commitChatId), [])
+                    .then((result) => {
+                        if (result?.title) {
+                            updateSessionByChatId(Number(commitChatId), {
+                                title: result.title,
+                                lastMessageAt: new Date(),
+                            });
+                        }
+                    })
+                    .catch(console.error);
             }
         } catch (error: any) {
             console.error("Chat API error:", error);
