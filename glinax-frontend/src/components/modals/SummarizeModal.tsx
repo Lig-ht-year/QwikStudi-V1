@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDataStore } from "@/stores/dataStore";
+import { AsyncFeatureStatus } from "@/components/AsyncFeatureStatus";
 
 interface SummarizeModalProps {
     isOpen: boolean;
@@ -244,32 +245,30 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
                 </div>
 
                 {/* Footer */}
-                <div className="p-5 border-t border-border/50 flex items-center justify-end bg-muted/20">
-                    {submitError && (
-                        <p className="text-xs text-red-400 mr-auto">{submitError}</p>
-                    )}
-                    <button
-                        onClick={handleGenerate}
-                        disabled={!hasContent || isGenerating}
-                        className={cn(
-                            "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
-                            !hasContent || isGenerating
-                                ? "opacity-50 cursor-not-allowed"
-                                : "hover:bg-primary/90 hover:scale-105"
+                <div className="p-5 border-t border-border/50 bg-muted/20">
+                    <div className="flex items-center justify-end">
+                        {submitError && (
+                            <p className="text-xs text-red-400 mr-auto">{submitError}</p>
                         )}
-                    >
-                        {isGenerating ? (
-                            <>
+                        <button
+                            onClick={handleGenerate}
+                            disabled={!hasContent || isGenerating}
+                            className={cn(
+                                "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
+                                !hasContent || isGenerating
+                                    ? "opacity-50 cursor-not-allowed"
+                                    : "hover:bg-primary/90 hover:scale-105"
+                            )}
+                        >
+                            {isGenerating ? (
                                 <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                Summarizing...
-                            </>
-                        ) : (
-                            <>
+                            ) : (
                                 <Sparkles className="w-4 h-4" />
-                                Generate Summary
-                            </>
-                        )}
-                    </button>
+                            )}
+                            Generate Summary
+                        </button>
+                    </div>
+                    <AsyncFeatureStatus feature="summarize" isActive={isGenerating} />
                 </div>
             </div>
         </div>

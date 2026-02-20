@@ -39,6 +39,14 @@ interface QuizWidgetCardProps {
 }
 
 export function QuizWidgetCard({ title, questions, difficulty = "medium", quizType }: QuizWidgetCardProps) {
+    const safeQuestions = Array.isArray(questions)
+        ? questions.filter((q): q is Question =>
+            !!q &&
+            typeof q === "object" &&
+            typeof q.question === "string" &&
+            Array.isArray(q.options)
+        )
+        : [];
     const [currentIdx, setCurrentIdx] = useState(0);
     const [selectedOption, setSelectedOption] = useState<number | null>(null);
     const [textAnswer, setTextAnswer] = useState("");
@@ -50,8 +58,8 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
     const [isGradingText, setIsGradingText] = useState(false);
     const [viewMode, setViewMode] = useState<'quiz' | 'review'>('quiz');
 
-    const currentQuestion = questions[currentIdx];
-    const progress = ((currentIdx + 1) / questions.length) * 100;
+    const currentQuestion = safeQuestions[currentIdx];
+    const progress = safeQuestions.length > 0 ? ((currentIdx + 1) / safeQuestions.length) * 100 : 0;
     const score = useMemo(
         () => Array.from(questionResults.values()).filter(Boolean).length,
         [questionResults]
@@ -60,8 +68,8 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
     // Calculate stats
     const correctCount = score;
     const incorrectCount = questionResults.size - score;
-    const unansweredCount = questions.length - questionResults.size;
-    const percentage = questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
+    const unansweredCount = safeQuestions.length - questionResults.size;
+    const percentage = safeQuestions.length > 0 ? Math.round((score / safeQuestions.length) * 100) : 0;
 
     // Get performance rating
     const performanceRating = useMemo(() => {
@@ -82,6 +90,19 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
             setCurrentIdx(firstIncorrectIdx);
         }
     }, [viewMode, incorrectCount, firstIncorrectIdx]);
+
+    if (safeQuestions.length === 0 || !currentQuestion) {
+        return (
+            <div className="w-full max-w-md bg-card border border-border/50 rounded-3xl overflow-hidden shadow-2xl p-6">
+                <div className="text-center space-y-2">
+                    <h4 className="text-base font-bold text-foreground">Quiz unavailable</h4>
+                    <p className="text-sm text-muted-foreground">
+                        This quiz has no valid questions to display. Please generate it again.
+                    </p>
+                </div>
+            </div>
+        );
+    }
 
     // Get current question type (from question, quiz type prop, or inferred from options)
     const getQuestionType = (): QuestionType => {
@@ -232,7 +253,7 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                             <span className="font-bold text-lg">Quiz Complete!</span>
                         </div>
                         <span className="text-xs font-bold bg-white/20 px-3 py-1 rounded-full">
-                            {difficulty} • {questions.length} Qs
+                            {difficulty} • {safeQuestions.length} Qs
                         </span>
                     </div>
                     
@@ -266,7 +287,7 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                             </svg>
                             <div className="absolute inset-0 flex flex-col items-center justify-center">
                                 <span className="text-3xl font-bold">{percentage}%</span>
-                                <span className="text-xs text-white/80">{score}/{questions.length}</span>
+                                <span className="text-xs text-white/80">{score}/{safeQuestions.length}</span>
                             </div>
                         </div>
                     </div>
@@ -322,7 +343,7 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                     <div className="border-t pt-4">
                         <p className="text-xs font-semibold text-muted-foreground mb-3">QUESTION NAVIGATOR</p>
                         <div className="flex flex-wrap gap-2">
-                            {questions.map((q, idx) => {
+                            {safeQuestions.map((q, idx) => {
                                 const isAnswered = questionResults.has(idx);
                                 const isCorrect = questionResults.get(idx) === true;
                                 
@@ -331,6 +352,7 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                         key={idx}
                                         onClick={() => {
                                             setViewMode('quiz');
+                                            setIsFinished(false);
                                             goToQuestion(idx);
                                         }}
                                         className={cn(
@@ -567,14 +589,14 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                         onClick={nextQuestion}
                         className="w-full py-4 bg-primary text-primary-foreground rounded-2xl font-bold hover:bg-primary/90 transition-all flex items-center justify-center gap-2 group shadow-lg shadow-primary/20"
                     >
-                        {currentIdx === questions.length - 1 ? (
+                        {currentIdx === safeQuestions.length - 1 ? (
                             <>
                                 <Trophy className="w-5 h-5" />
                                 Finish Quiz
                             </>
                         ) : (
                             <>
-                                {viewMode === 'review' && currentIdx < questions.length - 1 ? (
+                                {viewMode === 'review' && currentIdx < safeQuestions.length - 1 ? (
                                     <>
                                         Next Review
                                         <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />

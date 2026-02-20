@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
 import { useDataStore } from "@/stores/dataStore";
+import { AsyncFeatureStatus } from "@/components/AsyncFeatureStatus";
 
 interface QuizConfigModalProps {
     isOpen: boolean;
@@ -94,9 +95,19 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
             'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'text/markdown',
+            'application/vnd.ms-powerpoint',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         ];
+        const permissiveMimeTypes = new Set([
+            'application/octet-stream',
+            'binary/octet-stream',
+            'application/x-download',
+            'application/force-download',
+        ]);
 
-        if (file.type && !validMimeTypes.includes(file.type)) {
+        const mime = (file.type || '').toLowerCase().trim();
+        // Some browsers/storage layers report generic MIME types for otherwise valid files.
+        if (mime && !validMimeTypes.includes(mime) && !permissiveMimeTypes.has(mime)) {
             showToast('Invalid file type detected.', 'error');
             return false;
         }
@@ -338,37 +349,35 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                 </div>
 
                 {/* Footer */}
-                <div className="p-5 border-t border-border/50 flex items-center justify-between bg-background sticky bottom-0 z-20">
-                    <div>
-                        <div className="text-[10px] text-muted-foreground font-medium">
-                            {hasContent ? "Ready to generate" : "Upload file or use message content"}
+                <div className="p-5 border-t border-border/50 bg-background sticky bottom-0 z-20">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-[10px] text-muted-foreground font-medium">
+                                {hasContent ? "Ready to generate" : "Upload file or use message content"}
+                            </div>
+                            {submitError && (
+                                <p className="text-[11px] text-red-400 mt-1">{submitError}</p>
+                            )}
                         </div>
-                        {submitError && (
-                            <p className="text-[11px] text-red-400 mt-1">{submitError}</p>
-                        )}
-                    </div>
-                    <button
-                        onClick={handleGenerate}
-                        disabled={!hasContent || isGenerating || isQuestionTypeLocked}
-                        className={cn(
-                            "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
-                            !hasContent || isGenerating || isQuestionTypeLocked
-                                ? "opacity-50 cursor-not-allowed"
-                                : "hover:bg-primary/90 hover:scale-105"
-                        )}
-                    >
-                        {isGenerating ? (
-                            <>
+                        <button
+                            onClick={handleGenerate}
+                            disabled={!hasContent || isGenerating || isQuestionTypeLocked}
+                            className={cn(
+                                "px-5 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold flex items-center gap-2 transition-all text-sm shadow-lg shadow-primary/20",
+                                !hasContent || isGenerating || isQuestionTypeLocked
+                                    ? "opacity-50 cursor-not-allowed"
+                                    : "hover:bg-primary/90 hover:scale-105"
+                            )}
+                        >
+                            {isGenerating ? (
                                 <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                Generating...
-                            </>
-                        ) : (
-                            <>
+                            ) : (
                                 <Sparkles className="w-4 h-4" />
-                                Generate Quiz
-                            </>
-                        )}
-                    </button>
+                            )}
+                            Generate Quiz
+                        </button>
+                    </div>
+                    <AsyncFeatureStatus feature="quiz" isActive={isGenerating} />
                 </div>
             </div>
         </div>

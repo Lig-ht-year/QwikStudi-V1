@@ -22,6 +22,21 @@ interface MessageBubbleProps {
     onRate?: (rating: 'like' | 'dislike' | null) => void;
 }
 
+type QuizQuestionPayload = {
+    question?: unknown;
+    options?: unknown;
+    correctAnswer?: unknown;
+    correctText?: unknown;
+    explanation?: unknown;
+    concept?: unknown;
+    guidance?: unknown;
+};
+
+type SummaryKeyTerm = {
+    term: string;
+    definition: string;
+};
+
 // Helper function to safely format content for display
 function formatContentForDisplay(content: unknown): string {
     if (typeof content === 'string') {
@@ -81,6 +96,16 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
             return undefined;
         }
     })();
+
+    const summaryKeyTerms: SummaryKeyTerm[] = Array.isArray(metadata?.keyTerms)
+        ? metadata.keyTerms
+            .filter((item): item is { term?: unknown; definition?: unknown } => !!item && typeof item === "object")
+            .map((item) => ({
+                term: typeof item.term === "string" ? item.term.trim() : "",
+                definition: typeof item.definition === "string" ? item.definition.trim() : "",
+            }))
+            .filter((item) => item.term.length > 0 && item.definition.length > 0)
+        : [];
 
     const formatFileSize = (bytes?: number) => {
         if (!bytes || bytes <= 0) return "";
@@ -145,21 +170,83 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
         window.speechSynthesis.speak(utterance);
     };
 
+    const buildQuizContentForChaining = () => {
+        const questions = Array.isArray(metadata?.questions) ? metadata.questions as QuizQuestionPayload[] : [];
+        if (questions.length === 0) return displayContent;
+
+        const title = typeof metadata?.title === "string" ? metadata.title : "Generated Quiz";
+        const lines: string[] = [`${title}`, ""];
+
+        questions.forEach((q, idx) => {
+            const questionText = typeof q.question === "string" ? q.question.trim() : "";
+            if (!questionText) return;
+
+            lines.push(`Question ${idx + 1}: ${questionText}`);
+
+            const options = Array.isArray(q.options) ? q.options.filter((opt): opt is string => typeof opt === "string") : [];
+            if (options.length > 0) {
+                lines.push("Options:");
+                options.forEach((opt, optIdx) => {
+                    const letter = String.fromCharCode(65 + optIdx);
+                    lines.push(`${letter}. ${opt}`);
+                });
+            }
+
+            if (typeof q.correctText === "string" && q.correctText.trim()) {
+                lines.push(`Answer: ${q.correctText.trim()}`);
+            } else if (typeof q.correctAnswer === "number" && options[q.correctAnswer]) {
+                lines.push(`Answer: ${options[q.correctAnswer]}`);
+            }
+
+            if (typeof q.explanation === "string" && q.explanation.trim()) {
+                lines.push(`Explanation: ${q.explanation.trim()}`);
+            }
+            if (typeof q.concept === "string" && q.concept.trim()) {
+                lines.push(`Concept: ${q.concept.trim()}`);
+            }
+            if (typeof q.guidance === "string" && q.guidance.trim()) {
+                lines.push(`Guidance: ${q.guidance.trim()}`);
+            }
+
+            lines.push("");
+        });
+
+        const compiled = lines.join("\n").trim();
+        return compiled || displayContent;
+    };
+
+    const getChainingContent = () => {
+        if (type === "quiz") return buildQuizContentForChaining();
+        if (type === "summary" && typeof metadata?.summary === "string" && metadata.summary.trim()) {
+            return metadata.summary;
+        }
+        if (type === "notes" && Array.isArray(metadata?.notes)) {
+            const notes = metadata.notes.filter((n): n is string => typeof n === "string");
+            if (notes.length > 0) return notes.join("\n");
+        }
+        if (type === "audio" && typeof metadata?.transcript === "string" && metadata.transcript.trim()) {
+            return metadata.transcript;
+        }
+        return displayContent;
+    };
+
     // Feature chaining - use this message content for summarize/quiz
     const handleSummarizeThis = () => {
+        const chainingContent = getChainingContent();
         // Store the content for the summarize modal to use
         useDataStore.getState().setSelectedContent({
             type: 'summarize',
-            content: content,
+            content: chainingContent,
         });
         setActiveModal('summarize');
     };
 
     const handleGenerateQuiz = () => {
+        const chainingContent = getChainingContent();
         // Store the content for the quiz modal to use
         useDataStore.getState().setSelectedContent({
             type: 'quiz',
-            content: content,
+            content: chainingContent,
         });
         setActiveModal('quiz');
     };
@@ -242,6 +329,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
                                 title={String(metadata.title || '')} 
                                 audioUrl={typeof metadata.audio_url === 'string' ? metadata.audio_url : undefined}
                                 duration={String(metadata.duration || '')} 
+                                ttsId={typeof metadata.tts_id === 'number' ? metadata.tts_id : undefined}
                                 transcript={
                                     typeof metadata.transcript === 'string'
                                         ? metadata.transcript
@@ -262,7 +350,9 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
                             <SummaryCard 
                                 title={String(metadata.title || '')} 
                                 summary={typeof metadata.summary === 'string' ? metadata.summary : String(metadata.summary || '')} 
-                                takeaways={Array.isArray(metadata.takeaways) ? metadata.takeaways.map(String) : []} 
+                                takeaways={Array.isArray(metadata.takeaways) ? metadata.takeaways.map(String) : []}
+                                keyTerms={summaryKeyTerms}
+                                onRetry={handleSummarizeThis}
                             />
                         )}
                         {type === 'notes' && (

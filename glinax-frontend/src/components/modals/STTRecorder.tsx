@@ -5,12 +5,12 @@ import {
     X,
     Mic,
     Square,
-    Upload,
     FileAudio,
     Pause,
     Play
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AsyncFeatureStatus } from "@/components/AsyncFeatureStatus";
 
 interface STTRecorderProps {
     isOpen: boolean;
@@ -278,7 +278,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                     <div className="h-16 flex items-center justify-center gap-[3px]">
                         {Array.from({ length: waveformBars }).map((_, i) => {
                             const height = isRecording && !isPaused
-                                ? Math.random() * 80 + 20
+                                ? Math.max(20, Math.min(100, audioLevel + (Math.random() * 30 - 15)))
                                 : 20;
                             return (
                                 <div
@@ -299,7 +299,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                             {formatTime(recordingTime)}
                         </div>
                         <div className="text-xs text-muted-foreground mt-1.5 font-medium">
-                            {isRecording ? (isPaused ? "Paused" : "Recording...") : "Ready to record"}
+                            {isRecording ? (isPaused ? "Paused" : "Recording in progress") : "Ready to record"}
                         </div>
                     </div>
 
@@ -380,18 +380,14 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                             className="w-full py-2.5 bg-primary text-primary-foreground rounded-lg font-semibold flex items-center justify-center gap-2 hover:bg-primary/90 transition-all text-xs shadow-lg shadow-primary/20"
                         >
                             {isProcessing ? (
-                                <>
-                                    <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                    Processing...
-                                </>
+                                <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                             ) : (
-                                <>
-                                    <Mic className="w-3 h-3" />
-                                    Generate Notes
-                                </>
+                                <Mic className="w-3 h-3" />
                             )}
+                            Generate Notes
                         </button>
                     )}
+                    <AsyncFeatureStatus feature="stt" isActive={isProcessing} />
                 </div>
             </div>
         </div>

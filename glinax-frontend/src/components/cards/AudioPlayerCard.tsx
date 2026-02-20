@@ -8,27 +8,38 @@ import {
     Volume2,
     FastForward,
     ChevronRight,
-    Headphones
+    Headphones,
+    Download
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import api from "@/lib/api";
+import { useDataStore } from "@/stores/dataStore";
+import { useToast } from "@/components/Toast";
 
 interface AudioPlayerCardProps {
     title: string;
     audioUrl?: string;
     duration?: string;
     transcript?: string;
+    ttsId?: number;
 }
 
-export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript }: AudioPlayerCardProps) {
+export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript, ttsId }: AudioPlayerCardProps) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [speed, setSpeed] = useState(1);
     const [progress, setProgress] = useState(0);
     const [currentTime, setCurrentTime] = useState(0);
+    const [durationSeconds, setDurationSeconds] = useState(0);
     const [showTranscript, setShowTranscript] = useState(false);
     const [audioSrc, setAudioSrc] = useState<string | undefined>(audioUrl);
     const [candidateIndex, setCandidateIndex] = useState(0);
+    const [isDownloading, setIsDownloading] = useState(false);
+    const isScrubbingRef = React.useRef(false);
     const audioRef = React.useRef<HTMLAudioElement | null>(null);
     const progressRef = React.useRef<HTMLDivElement | null>(null);
+    const plan = useDataStore((state) => state.plan);
+    const canDownload = plan === "pro";
+    const { showToast } = useToast();
 
     const buildAudioCandidates = React.useCallback((rawUrl?: string) => {
         if (!rawUrl) return [] as string[];
@@ -63,7 +74,25 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     React.useEffect(() => {
         setCandidateIndex(0);
         setAudioSrc(candidates[0]);
+        setIsPlaying(false);
+        setProgress(0);
+        setCurrentTime(0);
+        setDurationSeconds(0);
     }, [candidates]);
+
+    const parseDurationToSeconds = React.useCallback((raw?: string) => {
+        if (!raw) return 0;
+        const trimmed = raw.trim();
+        if (!trimmed) return 0;
+        const parts = trimmed.split(":").map((v) => Number(v));
+        if (parts.some((v) => Number.isNaN(v) || v < 0)) return 0;
+        if (parts.length === 1) return parts[0];
+        if (parts.length === 2) return (parts[0] * 60) + parts[1];
+        if (parts.length === 3) return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+        return 0;
+    }, []);
+
+    const fallbackDurationSeconds = React.useMemo(() => parseDurationToSeconds(duration), [duration, parseDurationToSeconds]);
 
     const toggleSpeed = () => {
         const next = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
@@ -95,9 +124,30 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
         setCurrentTime(audioRef.current.currentTime);
     };
 
+    const handleLoadedMetadata = () => {
+        if (!audioRef.current) return;
+        const d = audioRef.current.duration;
+        if (Number.isFinite(d) && d > 0) {
+            setDurationSeconds(d);
+            const pct = (audioRef.current.currentTime / d) * 100;
+            setProgress(Number.isFinite(pct) ? pct : 0);
+            setCurrentTime(audioRef.current.currentTime);
+        }
+    };
+
+    const handleDurationChange = () => {
+        if (!audioRef.current) return;
+        const d = audioRef.current.duration;
+        if (Number.isFinite(d) && d > 0) {
+            setDurationSeconds(d);
+        }
+    };
+
     const handleEnded = () => {
         setIsPlaying(false);
         setProgress(100);
+        const total = durationSeconds || fallbackDurationSeconds;
+        if (total > 0) setCurrentTime(total);
     };
 
     const handleAudioError = () => {
@@ -110,34 +160,89 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
         setAudioSrc(candidates[nextIndex]);
     };
 
-    const handleSeek = (clientX: number) => {
+    const handleSeek = React.useCallback((clientX: number) => {
         if (!audioRef.current || !progressRef.current || !audioRef.current.duration) return;
         const rect = progressRef.current.getBoundingClientRect();
         const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-        audioRef.current.currentTime = ratio * audioRef.current.duration;
-    };
+        const nextTime = ratio * audioRef.current.duration;
+        audioRef.current.currentTime = nextTime;
+        setCurrentTime(nextTime);
+        setProgress(ratio * 100);
+    }, []);
+
+    const stopScrubbing = React.useCallback(() => {
+        isScrubbingRef.current = false;
+    }, []);
 
     const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
         handleSeek(e.clientX);
     };
 
+    const handleProgressPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (!audioRef.current || !audioRef.current.duration) return;
+        isScrubbingRef.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        handleSeek(e.clientX);
+    };
+
+    const handleProgressPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+        if (!isScrubbingRef.current) return;
+        handleSeek(e.clientX);
+    };
+
+    const handleProgressPointerUp = () => {
+        stopScrubbing();
+    };
+
+    React.useEffect(() => {
+        const onGlobalPointerMove = (e: PointerEvent) => {
+            if (!isScrubbingRef.current) return;
+            handleSeek(e.clientX);
+        };
+        const onGlobalPointerEnd = () => {
+            stopScrubbing();
+        };
+
+        window.addEventListener("pointermove", onGlobalPointerMove);
+        window.addEventListener("pointerup", onGlobalPointerEnd);
+        window.addEventListener("pointercancel", onGlobalPointerEnd);
+
+        return () => {
+            window.removeEventListener("pointermove", onGlobalPointerMove);
+            window.removeEventListener("pointerup", onGlobalPointerEnd);
+            window.removeEventListener("pointercancel", onGlobalPointerEnd);
+        };
+    }, [handleSeek, stopScrubbing]);
+
     const handleProgressKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
         if (!audioRef.current || !audioRef.current.duration) return;
         if (e.key === "ArrowRight") {
-            audioRef.current.currentTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 5);
+            const nextTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 5);
+            audioRef.current.currentTime = nextTime;
+            setCurrentTime(nextTime);
+            setProgress((nextTime / audioRef.current.duration) * 100);
         } else if (e.key === "ArrowLeft") {
-            audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 5);
+            const nextTime = Math.max(0, audioRef.current.currentTime - 5);
+            audioRef.current.currentTime = nextTime;
+            setCurrentTime(nextTime);
+            setProgress((nextTime / audioRef.current.duration) * 100);
         }
     };
 
     const handleRewind = () => {
-        if (!audioRef.current) return;
-        audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 10);
+        if (!audioRef.current || !audioRef.current.duration) return;
+        const nextTime = Math.max(0, audioRef.current.currentTime - 10);
+        audioRef.current.currentTime = nextTime;
+        setCurrentTime(nextTime);
+        setProgress((nextTime / audioRef.current.duration) * 100);
     };
 
     const handleForward = () => {
         if (!audioRef.current || !audioRef.current.duration) return;
-        audioRef.current.currentTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 10);
+        const nextTime = Math.min(audioRef.current.duration, audioRef.current.currentTime + 10);
+        audioRef.current.currentTime = nextTime;
+        setCurrentTime(nextTime);
+        setProgress((nextTime / audioRef.current.duration) * 100);
     };
 
     const formatTime = (seconds: number) => {
@@ -145,6 +250,31 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
         const m = Math.floor(s / 60);
         const r = s % 60;
         return `${m}:${r.toString().padStart(2, "0")}`;
+    };
+
+    const displayDurationSeconds = durationSeconds > 0 ? durationSeconds : fallbackDurationSeconds;
+
+    const handleDownload = async () => {
+        if (!canDownload) {
+            showToast("Upgrade to Pro to download audio.", "info");
+            return;
+        }
+        if (!ttsId || isDownloading) return;
+        setIsDownloading(true);
+        try {
+            const res = await api.get(`/chat/audio/${ttsId}/download/`, { responseType: "blob" });
+            const blob = new Blob([res.data], { type: "audio/mpeg" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `${title || "audio"}.mp3`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        } finally {
+            setIsDownloading(false);
+        }
     };
 
     return (
@@ -155,6 +285,8 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                     src={audioSrc}
                     preload="metadata"
                     onTimeUpdate={handleTimeUpdate}
+                    onLoadedMetadata={handleLoadedMetadata}
+                    onDurationChange={handleDurationChange}
                     onEnded={handleEnded}
                     onError={handleAudioError}
                 />
@@ -182,9 +314,13 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                         aria-valuemax={100}
                         aria-valuenow={Math.round(progress)}
                         onClick={handleProgressClick}
+                        onPointerDown={handleProgressPointerDown}
+                        onPointerMove={handleProgressPointerMove}
+                        onPointerUp={handleProgressPointerUp}
+                        onPointerCancel={handleProgressPointerUp}
                         onKeyDown={handleProgressKey}
                         className={cn(
-                            "h-1.5 w-full bg-muted rounded-full overflow-hidden cursor-pointer group",
+                            "h-1.5 w-full bg-muted rounded-full overflow-hidden cursor-pointer group touch-none",
                             !audioSrc && "opacity-50 cursor-not-allowed"
                         )}
                     >
@@ -197,7 +333,7 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                     </div>
                     <div className="flex justify-between text-[10px] text-muted-foreground font-medium">
                         <span>{formatTime(currentTime)}</span>
-                        <span>{duration}</span>
+                        <span>{displayDurationSeconds > 0 ? formatTime(displayDurationSeconds) : "--:--"}</span>
                     </div>
                 </div>
 
@@ -233,6 +369,14 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
                             className="text-[10px] font-bold px-2 py-1 bg-secondary rounded-md hover:bg-muted transition-colors min-w-[32px]"
                         >
                             {speed}x
+                        </button>
+                        <button
+                            onClick={handleDownload}
+                            disabled={!ttsId || isDownloading}
+                            title={canDownload ? "Download audio" : "Pro only"}
+                            className="p-2 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                        >
+                            <Download className="w-4 h-4" />
                         </button>
                         <button className="p-2 text-muted-foreground hover:text-foreground transition-colors">
                             <Volume2 className="w-4 h-4" />

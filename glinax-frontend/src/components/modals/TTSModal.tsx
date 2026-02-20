@@ -11,6 +11,7 @@ import {
     Type
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AsyncFeatureStatus } from "@/components/AsyncFeatureStatus";
 
 interface TTSModalProps {
     isOpen: boolean;
@@ -185,7 +186,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                             ) : (
                                 <div className="text-center">
                                     <p className="text-xs font-medium text-muted-foreground">Drop file or click to browse</p>
-                                    <p className="text-[10px] text-muted-foreground/50 mt-1">TXT, PDF, DOC supported</p>
+                                    <p className="text-[10px] text-muted-foreground/50 mt-1">TXT, PDF, DOC, DOCX, MD supported</p>
                                 </div>
                             )}
                         </div>
@@ -225,35 +226,33 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                 </div>
 
                 {/* Footer */}
-                <div className="p-4 border-t border-border/50 bg-muted/20 flex items-center justify-between">
-                    <div>
-                        <div className="text-[10px] text-muted-foreground font-medium pl-1">
-                            {activeText.length > 0 ? `${activeText.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                <div className="p-4 border-t border-border/50 bg-muted/20">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-[10px] text-muted-foreground font-medium pl-1">
+                                {activeText.length > 0 ? `${activeText.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                            </div>
+                            {submitError && <p className="text-xs text-red-400 mt-1">{submitError}</p>}
                         </div>
-                        {submitError && <p className="text-xs text-red-400 mt-1">{submitError}</p>}
-                    </div>
-                    <button
-                        onClick={handleGenerate}
-                        disabled={isSubmitDisabled}
-                        className={cn(
-                            "px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-primary/10",
-                            isSubmitDisabled
-                                ? "opacity-50 cursor-not-allowed grayscale"
-                                : "hover:shadow-primary/25 hover:scale-[1.02]"
-                        )}
-                    >
-                        {isGenerating ? (
-                            <>
+                        <button
+                            onClick={handleGenerate}
+                            disabled={isSubmitDisabled}
+                            className={cn(
+                                "px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-primary/10",
+                                isSubmitDisabled
+                                    ? "opacity-50 cursor-not-allowed grayscale"
+                                    : "hover:shadow-primary/25 hover:scale-[1.02]"
+                            )}
+                        >
+                            {isGenerating ? (
                                 <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                Generating...
-                            </>
-                        ) : (
-                            <>
+                            ) : (
                                 <Headphones className="w-3 h-3" />
-                                Generate Audio
-                            </>
-                        )}
-                    </button>
+                            )}
+                            Generate Audio
+                        </button>
+                    </div>
+                    <AsyncFeatureStatus feature="tts" isActive={isGenerating} />
                 </div>
             </div>
         </div>

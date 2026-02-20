@@ -114,6 +114,21 @@ def _estimate_tts_minutes(text: str) -> float:
     return max(minutes, 0.01)
 
 
+def _to_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off", ""}:
+        return False
+    return default
+
+
 def _resolve_stored_file_type(file_name: str) -> str:
     ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
     if ext == "pdf":
@@ -990,13 +1005,33 @@ class TextToAudioView(APIView):
     def post(self, request):
         text = request.data.get('text')
         if not text and 'file' in request.FILES:
-            text = extract_text_from_file(request.FILES['file'])
+            upload = request.FILES['file']
+            allowed_types = {'pdf', 'txt', 'doc', 'docx', 'md'}
+            ext = upload.name.lower().split('.')[-1] if '.' in upload.name else ''
+            if ext not in allowed_types:
+                return Response(
+                    {"error": f"Invalid file type. Allowed: {', '.join(sorted(allowed_types))}"},
+                    status=400
+                )
+            max_file_bytes = max(1024, int(getattr(settings, "TTS_SOURCE_MAX_FILE_BYTES", 10 * 1024 * 1024)))
+            if upload.size > max_file_bytes:
+                return Response(
+                    {"error": f"File too large. Maximum size is {max_file_bytes // (1024 * 1024)}MB."},
+                    status=400
+                )
+            text = extract_text_from_file(upload)
         if isinstance(text, str):
             text = text.strip()
         if not text:
             return Response({"error": "No text provided"}, status=400)
         chat_id = request.data.get("chat_id")
         voice = request.data.get("voice", "alloy")
+        allowed_voices = {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
+        if voice not in allowed_voices:
+            return Response(
+                {"error": f"Invalid voice. Allowed: {', '.join(sorted(allowed_voices))}"},
+                status=400
+            )
         
         # Validate text length (prevent cost abuse - TTS is priced per character)
         MAX_TTS_LENGTH = 500
@@ -1081,12 +1116,14 @@ class TextToAudioView(APIView):
 
 
 class AudioFileByIdView(APIView):
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, tts_id: int):
         tts_obj = TextToSpeech.objects.filter(id=tts_id).first()
         if not tts_obj or not tts_obj.audio_file:
             return Response({"error": "Audio file not found."}, status=404)
+        if tts_obj.user_id != request.user.id:
+            return Response({"error": "You do not have access to this audio file."}, status=403)
 
         try:
             audio_stream = tts_obj.audio_file.open("rb")
@@ -1097,6 +1134,31 @@ class AudioFileByIdView(APIView):
 
         filename = tts_obj.audio_file.name.rsplit("/", 1)[-1] or f"{tts_id}.mp3"
         return FileResponse(audio_stream, content_type="audio/mpeg", as_attachment=False, filename=filename)
+
+
+class AudioFileDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, tts_id: int):
+        tts_obj = TextToSpeech.objects.filter(id=tts_id).first()
+        if not tts_obj or not tts_obj.audio_file:
+            return Response({"error": "Audio file not found."}, status=404)
+        if tts_obj.user_id != request.user.id:
+            return Response({"error": "You do not have access to this audio file."}, status=403)
+
+        profile = _get_payments_profile(request.user)
+        if not _is_premium(profile):
+            return Response({"error": "Downloading audio is available on the Pro plan."}, status=403)
+
+        try:
+            audio_stream = tts_obj.audio_file.open("rb")
+        except FileNotFoundError:
+            return Response({"error": "Audio file not found."}, status=404)
+        except Exception:
+            return Response({"error": "Failed to open audio file."}, status=500)
+
+        filename = tts_obj.audio_file.name.rsplit("/", 1)[-1] or f"{tts_id}.mp3"
+        return FileResponse(audio_stream, content_type="audio/mpeg", as_attachment=True, filename=filename)
 
 
 import io
@@ -1364,6 +1426,9 @@ class QuizGenerateAPIView(APIView):
             question_count = 10
         if question_count < 1:
             question_count = 1
+        max_questions = max(5, int(getattr(settings, "QUIZ_MAX_QUESTIONS", 50)))
+        if question_count > max_questions:
+            question_count = max_questions
         difficulty = str(request.data.get("difficulty", "medium")).lower().strip()
         if difficulty not in {"easy", "medium", "hard"}:
             difficulty = "medium"
@@ -1392,7 +1457,7 @@ class QuizGenerateAPIView(APIView):
         persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="qa")
         
         # Validate file type
-        allowed_types = ['pdf', 'txt', 'doc', 'docx', 'md']
+        allowed_types = ['pdf', 'txt', 'doc', 'docx', 'ppt', 'pptx', 'md']
         ext = uploaded_file.name.lower().split('.')[-1]
         if ext not in allowed_types:
             return Response(
@@ -1580,6 +1645,7 @@ Only return valid JSON, nothing else.
                 )
 
             chat = _get_chat_for_write(request.user, chat_id)
+            chat_title = None
             if chat:
                 ChatHistory.objects.create(
                     chat=chat,
@@ -1729,7 +1795,7 @@ class SummarizeAPIView(APIView):
         # Get summary options from request
         length = request.data.get("length", "detailed")  # brief, detailed, comprehensive
         format_type = request.data.get("format", "bullets")  # bullets, paragraphs
-        include_key_terms = request.data.get("includeKeyTerms", True)
+        include_key_terms = _to_bool(request.data.get("includeKeyTerms", True), default=True)
         chat_id = request.data.get("chat_id")
         
         # Get uploaded file
@@ -1751,9 +1817,10 @@ class SummarizeAPIView(APIView):
         # Extract text from file
         text_content = extract_text_from_file(uploaded_file)
         
-        if not text_content or len(text_content) < 100:
+        min_chars = max(10, int(getattr(settings, "SUMMARY_SOURCE_MIN_CHARS", 20)))
+        if not text_content or len(text_content.strip()) < min_chars:
             return Response(
-                {"error": "Could not extract enough content from the file. Please try a different file."},
+                {"error": "Could not extract enough content from the file. Please try a different file or longer text."},
                 status=400
             )
         
@@ -1781,7 +1848,7 @@ Content:
 Requirements:
 - Length: {word_counts.get(length, '~300 words')}
 - Format: {format_instruction}
-- {key_terms_instruction}
+- {key_terms_instruction if key_terms_instruction else "Do not include a key terms section."}
 - Make it easy to study from
 - Highlight important concepts
 - Do not use LaTeX or math markup. Write equations in plain readable form (e.g., F = ma, 6CO2 + 6H2O -> C6H12O6 + 6O2).
@@ -1827,7 +1894,7 @@ Only return valid JSON, no additional text.
                     else:
                         raise ValueError("Could not parse summary from response")
             
-            normalized_summary = _normalize_summary_payload(summary_data, bool(include_key_terms))
+            normalized_summary = _normalize_summary_payload(summary_data, include_key_terms)
             summary_content = normalized_summary["summary"]
 
             chat = _get_chat_for_write(request.user, chat_id)
