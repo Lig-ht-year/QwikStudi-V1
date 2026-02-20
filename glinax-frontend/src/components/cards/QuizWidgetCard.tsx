@@ -14,6 +14,7 @@ import {
     PenLine
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import api from "@/lib/api";
 
 // Question types
 export type QuestionType = 'mcq' | 'tf' | 'fill' | 'essay';
@@ -25,6 +26,8 @@ export interface Question {
     correctAnswer: number;
     correctText?: string; // For fill-in-the-blank and essay questions
     explanation?: string;
+    concept?: string;
+    guidance?: string;
     type?: QuestionType; // Optional type field for frontend rendering
 }
 
@@ -40,19 +43,24 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
     const [selectedOption, setSelectedOption] = useState<number | null>(null);
     const [textAnswer, setTextAnswer] = useState("");
     const [showResult, setShowResult] = useState(false);
-    const [score, setScore] = useState(0);
     const [isFinished, setIsFinished] = useState(false);
-    const [userAnswers, setUserAnswers] = useState<Map<number, number>>(new Map());
+    const [questionResults, setQuestionResults] = useState<Map<number, boolean>>(new Map());
     const [userTextAnswers, setUserTextAnswers] = useState<Map<number, string>>(new Map());
+    const [textFeedback, setTextFeedback] = useState<Map<number, { concept: string; guidance: string; feedback: string; score: number }>>(new Map());
+    const [isGradingText, setIsGradingText] = useState(false);
     const [viewMode, setViewMode] = useState<'quiz' | 'review'>('quiz');
 
     const currentQuestion = questions[currentIdx];
     const progress = ((currentIdx + 1) / questions.length) * 100;
+    const score = useMemo(
+        () => Array.from(questionResults.values()).filter(Boolean).length,
+        [questionResults]
+    );
 
     // Calculate stats
     const correctCount = score;
-    const incorrectCount = userAnswers.size - score;
-    const unansweredCount = questions.length - userAnswers.size;
+    const incorrectCount = questionResults.size - score;
+    const unansweredCount = questions.length - questionResults.size;
     const percentage = questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
 
     // Get performance rating
@@ -65,10 +73,8 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
 
     // Find first incorrect answer for review mode
     const firstIncorrectIdx = useMemo(() => {
-        return Array.from(userAnswers.entries()).find(
-            ([idx, ans]) => questions[idx] && ans !== questions[idx].correctAnswer
-        )?.[0];
-    }, [userAnswers, questions]);
+        return Array.from(questionResults.entries()).find(([, isCorrect]) => !isCorrect)?.[0];
+    }, [questionResults]);
 
     // Review mode effect
     useEffect(() => {
@@ -90,32 +96,98 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
         return 'mcq';
     };
 
+    const getConceptLabel = (q: Question): string => {
+        if (q.concept && q.concept.trim()) return q.concept.trim();
+        const words = q.question.replace(/[^\w\s]/g, " ").split(/\s+/).filter(Boolean);
+        return words.slice(0, 2).join(" ") || "Core Concept";
+    };
+
+    const evaluateTextAnswer = (q: Question, answer: string, isEssay: boolean) => {
+        const normalizedAnswer = answer.trim().toLowerCase();
+        const answerWordCount = normalizedAnswer.split(/\s+/).filter(Boolean).length;
+        const reference = `${q.correctText || ""} ${q.explanation || ""}`.toLowerCase().trim();
+        const keywordPool = reference
+            .replace(/[^\w\s]/g, " ")
+            .split(/\s+/)
+            .filter((w) => w.length >= 4);
+        const uniqueKeywords = Array.from(new Set(keywordPool)).slice(0, 10);
+        const matched = uniqueKeywords.filter((kw) => normalizedAnswer.includes(kw)).length;
+        const overlap = uniqueKeywords.length > 0 ? matched / uniqueKeywords.length : 0;
+
+        if (isEssay) {
+            const isCorrect = answerWordCount >= 12 && (overlap >= 0.25 || uniqueKeywords.length === 0);
+            const guidance = isCorrect
+                ? `Good direction. Keep grounding your answer in ${getConceptLabel(q)} with concrete reasoning.`
+                : `Focus on ${getConceptLabel(q)}: define it first, then connect it to a concrete example from the topic.`;
+            return { isCorrect, guidance };
+        }
+
+        const isCorrect = answerWordCount >= 1 && (overlap >= 0.2 || uniqueKeywords.length === 0);
+        const guidance = isCorrect
+            ? `Correct direction. You captured the key idea in ${getConceptLabel(q)}.`
+            : `Revisit ${getConceptLabel(q)} and look for the exact term used in the material.`;
+        return { isCorrect, guidance };
+    };
+
     const handleOptionSelect = (idx: number) => {
         if (showResult) return;
         setSelectedOption(idx);
         setShowResult(true);
         
-        const newAnswers = new Map(userAnswers);
-        newAnswers.set(currentIdx, idx);
-        setUserAnswers(newAnswers);
-        
-        if (idx === currentQuestion.correctAnswer) {
-            setScore(prev => prev + 1);
-        }
+        const newResults = new Map(questionResults);
+        newResults.set(currentIdx, idx === currentQuestion.correctAnswer);
+        setQuestionResults(newResults);
     };
 
-    const handleTextAnswerSubmit = () => {
+    const handleTextAnswerSubmit = async () => {
         if (showResult || !textAnswer.trim()) return;
         setShowResult(true);
         
         const newTextAnswers = new Map(userTextAnswers);
         newTextAnswers.set(currentIdx, textAnswer.trim());
         setUserTextAnswers(newTextAnswers);
-        
-        // For fill-in-the-blank and essay, consider correct if answer was provided
-        // A real implementation would use AI to grade essays
-        if (textAnswer.trim().length > 0) {
-            setScore(prev => prev + 1);
+        const qType = getQuestionType();
+        const fallback = evaluateTextAnswer(currentQuestion, textAnswer, qType === 'essay');
+
+        try {
+            setIsGradingText(true);
+            const res = await api.post("/chat/quiz/grade-text/", {
+                question: currentQuestion.question,
+                answer: textAnswer.trim(),
+                questionType: qType,
+                difficulty,
+                expectedAnswer: currentQuestion.correctText || "",
+                explanation: currentQuestion.explanation || "",
+                concept: currentQuestion.concept || "",
+            });
+            const isCorrect = Boolean(res.data?.is_correct);
+            const score = Number(res.data?.score ?? (isCorrect ? 1 : 0));
+            const concept = String(res.data?.concept || getConceptLabel(currentQuestion));
+            const guidance = String(res.data?.guidance || fallback.guidance);
+            const feedback = String(res.data?.feedback || "");
+
+            const newResults = new Map(questionResults);
+            newResults.set(currentIdx, isCorrect);
+            setQuestionResults(newResults);
+
+            const newFeedback = new Map(textFeedback);
+            newFeedback.set(currentIdx, { concept, guidance, feedback, score: Math.max(0, Math.min(1, score)) });
+            setTextFeedback(newFeedback);
+        } catch {
+            const newResults = new Map(questionResults);
+            newResults.set(currentIdx, fallback.isCorrect);
+            setQuestionResults(newResults);
+
+            const newFeedback = new Map(textFeedback);
+            newFeedback.set(currentIdx, {
+                concept: getConceptLabel(currentQuestion),
+                guidance: fallback.guidance,
+                feedback: fallback.isCorrect ? "Good answer quality." : "Answer needs more precision.",
+                score: fallback.isCorrect ? 0.7 : 0.35,
+            });
+            setTextFeedback(newFeedback);
+        } finally {
+            setIsGradingText(false);
         }
     };
 
@@ -135,10 +207,10 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
         setSelectedOption(null);
         setTextAnswer("");
         setShowResult(false);
-        setScore(0);
         setIsFinished(false);
-        setUserAnswers(new Map());
+        setQuestionResults(new Map());
         setUserTextAnswers(new Map());
+        setTextFeedback(new Map());
         setViewMode('quiz');
     };
 
@@ -251,9 +323,8 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                         <p className="text-xs font-semibold text-muted-foreground mb-3">QUESTION NAVIGATOR</p>
                         <div className="flex flex-wrap gap-2">
                             {questions.map((q, idx) => {
-                                const userAnswer = userAnswers.get(idx);
-                                const isCorrect = userAnswer === q.correctAnswer;
-                                const isAnswered = userAnswer !== undefined;
+                                const isAnswered = questionResults.has(idx);
+                                const isCorrect = questionResults.get(idx) === true;
                                 
                                 return (
                                     <button
@@ -344,7 +415,9 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                     if (qType === 'fill' || qType === 'essay') {
                         const isFill = qType === 'fill';
                         const userAnswer = userTextAnswers.get(currentIdx);
-                        const isCorrect = userAnswer && userAnswer.length > 0;
+                        const isCorrect = questionResults.get(currentIdx) === true;
+                        const evaluated = evaluateTextAnswer(currentQuestion, userAnswer || "", qType === 'essay');
+                        const graded = textFeedback.get(currentIdx);
                         
                         return (
                             <div className="space-y-4">
@@ -384,11 +457,35 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                         <div className="flex items-start gap-2">
                                             <BookOpen className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
                                             <div>
+                                                <p className="text-[11px] font-bold text-blue-500 mb-1">
+                                                    Concept: {graded?.concept || getConceptLabel(currentQuestion)}
+                                                </p>
                                                 <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mb-1">
                                                     {isFill ? "Answer" : "Guidance"}
                                                 </p>
                                                 <p className="text-sm text-muted-foreground">
-                                                    {currentQuestion.correctText || currentQuestion.explanation || "Your answer has been recorded for review."}
+                                                    {graded?.guidance || currentQuestion.guidance || evaluated.guidance}
+                                                </p>
+                                                {graded?.feedback && (
+                                                    <p className="text-xs text-muted-foreground mt-2">
+                                                        Feedback: {graded.feedback}
+                                                    </p>
+                                                )}
+                                                {typeof graded?.score === "number" && (
+                                                    <p className="text-xs text-muted-foreground mt-1">
+                                                        Score: {Math.round(graded.score * 100)}%
+                                                    </p>
+                                                )}
+                                                {(currentQuestion.correctText || currentQuestion.explanation) && (
+                                                    <p className="text-sm text-muted-foreground mt-2">
+                                                        {currentQuestion.correctText || currentQuestion.explanation}
+                                                    </p>
+                                                )}
+                                                <p className={cn(
+                                                    "text-xs font-semibold mt-2",
+                                                    isCorrect ? "text-emerald-500" : "text-yellow-500"
+                                                )}>
+                                                    {isCorrect ? "Marked correct" : "Needs improvement"}
                                                 </p>
                                             </div>
                                         </div>
@@ -399,16 +496,16 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                 {!showResult && (
                                     <button
                                         onClick={handleTextAnswerSubmit}
-                                        disabled={!textAnswer.trim()}
+                                        disabled={!textAnswer.trim() || isGradingText}
                                         className={cn(
                                             "w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2",
-                                            textAnswer.trim()
+                                            textAnswer.trim() && !isGradingText
                                                 ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-lg shadow-primary/20"
                                                 : "bg-muted text-muted-foreground cursor-not-allowed"
                                         )}
                                     >
                                         <PenLine className="w-5 h-5" />
-                                        {isFill ? "Submit Answer" : "Submit Essay"}
+                                        {isGradingText ? "Grading..." : (isFill ? "Submit Answer" : "Submit Essay")}
                                     </button>
                                 )}
                             </div>
@@ -451,6 +548,12 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                         <div className="flex items-start gap-2">
                             <BookOpen className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
                             <div>
+                                <p className="text-[11px] font-bold text-blue-500 mb-1">
+                                    Concept: {getConceptLabel(currentQuestion)}
+                                </p>
+                                {currentQuestion.guidance && (
+                                    <p className="text-sm text-muted-foreground mb-2">{currentQuestion.guidance}</p>
+                                )}
                                 <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mb-1">Explanation</p>
                                 <p className="text-sm text-muted-foreground">{currentQuestion.explanation}</p>
                             </div>
@@ -490,4 +593,3 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
         </div>
     );
 }
-

@@ -7,7 +7,7 @@ import { ChatInput } from "./ChatInput";
 import { useUIStore } from "@/stores/uiStore";
 import { useDataStore } from "@/stores/dataStore";
 import { translations } from "@/lib/translations";
-import { formatDisplayName } from "@/lib/utils";
+import { cn, formatDisplayName } from "@/lib/utils";
 import { Brain, FileText, Headphones, Sparkles } from "lucide-react";
 import { getChatMessages } from "@/lib/getChatMessages";
 import { nanoid } from "nanoid";
@@ -153,6 +153,7 @@ export function ChatContainer() {
     const messages = useDataStore((state) => state.messages);
     const username = useDataStore((state) => state.username);
     const isLoggedIn = useDataStore((state) => state.isLoggedIn);
+    const isLimitExceeded = useDataStore((state) => state.isLimitExceeded);
     const hasHydrated = useDataStore((state) => state.hasHydrated);
     const language = useDataStore((state) => state.language);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
@@ -162,14 +163,16 @@ export function ChatContainer() {
     const t = translations[language];
     const isLoading = useUIStore((state) => state.isLoading);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
+    const setExplainPrompt = useUIStore((state) => state.setExplainPrompt);
     const setIsLoading = useUIStore((state) => state.setIsLoading);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
+    const previousLastMessageId = useRef<string | null>(null);
 
     // Dynamic greeting state
     const [greeting, setGreeting] = useState("");
     const [tagline, setTagline] = useState("");
     const [mounted, setMounted] = useState(false);
-    const [loadingElapsedMs, setLoadingElapsedMs] = useState(0);
 
     // Set greeting on mount (client-side only to avoid hydration mismatch)
     useEffect(() => {
@@ -257,31 +260,35 @@ export function ChatContainer() {
         };
     }, [activeSessionId, chatId]);
 
-    useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }, [messages, isLoading]);
+    const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
+        if (!scrollRef.current) return;
+        scrollRef.current.scrollTo({
+            top: scrollRef.current.scrollHeight,
+            behavior,
+        });
+    };
 
     useEffect(() => {
-        if (!isLoading) {
-            setLoadingElapsedMs(0);
-            return;
+        if (!messages.length) return;
+
+        const lastMessage = messages[messages.length - 1];
+        const previousId = previousLastMessageId.current;
+        previousLastMessageId.current = lastMessage.id;
+
+        // Avoid jump on initial hydration/history load
+        if (!previousId) return;
+
+        if (lastMessage.role === "assistant") {
+            const target = messageRefs.current[lastMessage.id];
+            if (target) {
+                target.scrollIntoView({ behavior: "smooth", block: "start" });
+                return;
+            }
         }
 
-        const startedAt = Date.now();
-        const timer = setInterval(() => {
-            setLoadingElapsedMs(Date.now() - startedAt);
-        }, 500);
-
-        return () => clearInterval(timer);
-    }, [isLoading]);
-
-    const loadingStatus = useMemo(() => {
-        if (loadingElapsedMs < 4000) return "QwikStudi is thinking";
-        if (loadingElapsedMs < 9000) return "Reviewing your question";
-        return "Crafting a clear response";
-    }, [loadingElapsedMs]);
+        // Keep user send / typing flow anchored near composer
+        scrollToBottom("smooth");
+    }, [messages]);
 
     // Handle quick suggestion click
     const handleSuggestionClick = (index: number) => {
@@ -294,6 +301,12 @@ export function ChatContainer() {
             case 0: setActiveModal('quiz'); break;
             case 1: setActiveModal('summarize'); break;
             case 2: setActiveModal('tts'); break;
+            case 3:
+                setExplainPrompt(
+                    "Explain this topic step-by-step in simple terms. Then add one practical example and 3 quick check questions: "
+                );
+                showToast("Explain mode ready. Type a topic and send.", "info");
+                break;
             default: break;
         }
     };
@@ -364,7 +377,10 @@ export function ChatContainer() {
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto px-4 custom-scrollbar"
             >
-                <div className="max-w-3xl mx-auto w-full pt-24 pb-48">
+                <div className={cn(
+                    "max-w-3xl mx-auto w-full pt-24",
+                    isLimitExceeded ? "pb-[22rem]" : "pb-48"
+                )}>
                     {messages.length === 0 ? (
                         <div className="flex flex-col items-center justify-center min-h-[50vh] text-center space-y-8 animate-in fade-in zoom-in duration-500">
                             {/* Dynamic Greeting */}
@@ -409,28 +425,26 @@ export function ChatContainer() {
                         </div>
                     ) : (
                         messages.map((message) => (
-                            <MessageBubble
+                            <div
                                 key={message.id}
-                                role={message.role}
-                                content={message.content}
-                                createdAt={message.createdAt}
-                                type={message.type}
-                                metadata={message.metadata}
-                                onRegenerate={message.role === 'assistant' && !isLoading ? handleRegenerate : undefined}
-                            />
+                                ref={(el) => {
+                                    messageRefs.current[message.id] = el;
+                                }}
+                            >
+                                <MessageBubble
+                                    role={message.role}
+                                    content={message.content}
+                                    createdAt={message.createdAt}
+                                    type={message.type}
+                                    metadata={message.metadata}
+                                    onRegenerate={message.role === 'assistant' && !isLoading ? handleRegenerate : undefined}
+                                />
+                            </div>
                         ))
                     )}
 
                     {isLoading && (
                         <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300" aria-live="polite" aria-atomic="true">
-                            <div className="flex items-center gap-2 mb-3">
-                                <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center shadow-md">
-                                    <span className="text-sm font-bold text-primary">Q</span>
-                                </div>
-                                <span className="text-sm font-semibold text-foreground">QwikStudi</span>
-                                <span className="text-xs text-muted-foreground/70">typing...</span>
-                            </div>
-
                             <div className="pl-9">
                                 <div className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-card/50 px-4 py-3">
                                     <div className="flex items-center gap-1.5">
@@ -438,7 +452,7 @@ export function ChatContainer() {
                                         <span className="w-2 h-2 rounded-full bg-primary/70 animate-bounce [animation-delay:120ms]" />
                                         <span className="w-2 h-2 rounded-full bg-primary/60 animate-bounce [animation-delay:240ms]" />
                                     </div>
-                                    <span className="text-sm text-muted-foreground">{loadingStatus}</span>
+                                    <span className="text-sm text-muted-foreground">QwikStudi is thinking</span>
                                 </div>
                             </div>
                         </div>

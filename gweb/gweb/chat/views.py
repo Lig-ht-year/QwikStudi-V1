@@ -32,6 +32,7 @@ from .utils import get_client_ip, generate_chat_title_from_openai, get_openai_cl
 
 from g_auth.models import GuestChatTracker, GuestIPTracker
 from payments.models import UserProfile as PaymentsUserProfile
+from files.models import File as StoredFile
 import re
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,38 @@ def _sanitize_response_text(text: str) -> str:
     if not isinstance(text, str):
         return text
     # Remove markdown symbols the user doesn't want shown.
-    return text.replace("#", "").replace("*", "")
+    cleaned = text.replace("#", "").replace("*", "")
+
+    # Convert common LaTeX fragments into student-friendly plain text.
+    replacements = {
+        "\\[": "",
+        "\\]": "",
+        "\\(": "",
+        "\\)": "",
+        "\\cdot": " * ",
+        "\\times": " x ",
+        "\\div": " / ",
+        "\\pm": "+/-",
+        "\\rightarrow": " -> ",
+        "\\Rightarrow": " => ",
+        "\\leq": " <= ",
+        "\\geq": " >= ",
+        "\\neq": " != ",
+        "\\approx": " ~ ",
+        "\\sqrt": "sqrt",
+        "\\frac": "frac",
+    }
+    for src, dst in replacements.items():
+        cleaned = cleaned.replace(src, dst)
+
+    # Remove \text{...} wrappers but keep content.
+    cleaned = re.sub(r"\\text\{([^}]*)\}", r"\1", cleaned)
+    # Convert simple LaTeX subscripts/superscripts into readable notation.
+    cleaned = re.sub(r"_\{([^}]*)\}", r"_(\1)", cleaned)
+    cleaned = re.sub(r"\^\{([^}]*)\}", r"^(\1)", cleaned)
+    cleaned = cleaned.replace("{", "").replace("}", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 def _get_chat_for_write(user, chat_id):
     if not chat_id:
@@ -73,6 +105,66 @@ def _estimate_tts_minutes(text: str) -> float:
     wpm = 150.0
     minutes = words / wpm if wpm else 0.0
     return max(minutes, 0.01)
+
+
+def _resolve_stored_file_type(file_name: str) -> str:
+    ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
+    if ext == "pdf":
+        return "pdf"
+    if ext in {"doc", "docx"}:
+        return "docx"
+    if ext in {"ppt", "pptx"}:
+        return "pptx"
+    if ext in {"png", "jpg", "jpeg", "gif", "webp"}:
+        return "image"
+    if ext in {"mp3", "wav", "ogg", "oga", "m4a"}:
+        return "audio"
+    return "other"
+
+
+def _persist_source_upload(user, uploaded_file, purpose: str) -> StoredFile:
+    stored = StoredFile.objects.create(
+        user=user,
+        file=uploaded_file,
+        file_type=_resolve_stored_file_type(uploaded_file.name),
+        purpose=purpose,
+        status="completed",
+    )
+    # Ensure extraction reads from the start after storage save.
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    return stored
+
+
+def _is_default_chat_title(title: str) -> bool:
+    normalized = str(title or "").strip().lower()
+    return normalized in {"", "new chat", "new study session", "untitled chat"}
+
+
+def _build_feature_chat_title(source_name: str, suffix: str) -> str:
+    filename = str(source_name or "").rsplit("/", 1)[-1]
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    stem = re.sub(r"[_\-]+", " ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    if not stem:
+        stem = "Study Material"
+    if len(stem) > 70:
+        stem = f"{stem[:67].rstrip()}..."
+    title = f"{stem} {suffix}".strip()
+    return title[:255]
+
+
+def _auto_title_feature_chat(chat: Chat | None, source_name: str, suffix: str) -> str | None:
+    if not chat:
+        return None
+    if not _is_default_chat_title(chat.title):
+        return chat.title
+    new_title = _build_feature_chat_title(source_name, suffix)
+    chat.title = new_title
+    chat.save()
+    return chat.title
 
 class AddCollaboratorAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -356,6 +448,14 @@ class ChatAPIView(APIView):
 - Reference previous questions when relevant to build continuity
 - Help connect new concepts to things we've already discussed
 
+## Response Quality Rules
+- If the question is ambiguous, ask one short clarifying question before giving a full answer.
+- If you are not sure, explicitly state uncertainty instead of guessing.
+- For factual claims, prefer concise, verifiable statements over long speculation.
+- Keep responses scannable with short paragraphs or bullets when useful.
+- Never output LaTeX commands or math markup (no \\, \[ \], \(...\), \text{{}}, etc.).
+- Write equations in plain student-readable form (example: 6CO2 + 6H2O -> C6H12O6 + 6O2).
+
 Remember: Your goal is to help users become better learners, not just to answer questions."""
         
         # Build conversation history
@@ -399,7 +499,7 @@ Remember: Your goal is to help users become better learners, not just to answer 
         try:
             client = get_openai_client()
             res = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=getattr(settings, "CHAT_OPENAI_MODEL", "gpt-4o-mini"),
                 messages=messages,
                 temperature=config["temperature"],
                 max_tokens=config["max_tokens"],
@@ -801,13 +901,16 @@ class TextToAudioView(APIView):
             )
         
         try:
+            started_at = time.monotonic()
+            tts_model = getattr(settings, "TTS_OPENAI_MODEL", "gpt-4o-mini-tts")
             # Generate speech using OpenAI TTS
             client = get_openai_client()
             response = client.audio.speech.create(
-                model="tts-1",
+                model=tts_model,
                 voice=voice,
                 input=text
             )
+            openai_elapsed = time.monotonic() - started_at
             
             # Save the response
             tts_obj = TextToSpeech.objects.create(
@@ -820,12 +923,17 @@ class TextToAudioView(APIView):
             file_name = f"{tts_obj.id}.mp3"
             tts_obj.audio_file.save(file_name, ContentFile(response.content))
             audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
+            total_elapsed = time.monotonic() - started_at
+            logger.info(
+                f"[TTS] model={tts_model} chars={len(text)} openai_s={openai_elapsed:.2f} total_s={total_elapsed:.2f}"
+            )
 
             if not premium_active:
                 profile.audio_minutes_used += estimated_minutes
                 profile.save(update_fields=["audio_minutes_used"])
 
             chat = _get_chat_for_write(request.user, chat_id)
+            chat_title = None
             if chat:
                 ChatHistory.objects.create(
                     chat=chat,
@@ -843,10 +951,13 @@ class TextToAudioView(APIView):
                     },
                     context="audio",
                 )
+                source_label = request.FILES['file'].name if 'file' in request.FILES else (text[:60] if text else "Text to Speech")
+                chat_title = _auto_title_feature_chat(chat, source_label, "Audio")
 
             return Response({
                 "id": tts_obj.id,
-                "audio_url": audio_url
+                "audio_url": audio_url,
+                "chat_title": chat_title,
             })
             
         except Exception as e:
@@ -875,6 +986,7 @@ class AudioFileByIdView(APIView):
 
 import io
 import PyPDF2
+import time
 from django.core.files.uploadedfile import UploadedFile
 
 
@@ -937,6 +1049,133 @@ def extract_text_from_file(file_obj) -> str:
             return ""
 
 
+def _prepare_llm_context(text: str, max_chars: int) -> str:
+    """Reduce token load while preserving beginning/middle/end coverage."""
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+
+    head_len = int(max_chars * 0.5)
+    middle_len = int(max_chars * 0.3)
+    tail_len = max_chars - head_len - middle_len
+
+    middle_start = max((len(normalized) - middle_len) // 2, 0)
+    middle = normalized[middle_start:middle_start + middle_len]
+    head = normalized[:head_len]
+    tail = normalized[-tail_len:] if tail_len > 0 else ""
+    return f"{head}\n...\n{middle}\n...\n{tail}"
+
+
+def _normalize_quiz_options(options) -> list[str]:
+    if not isinstance(options, list):
+        options = []
+    cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
+    default_options = ["Option A", "Option B", "Option C", "Option D"]
+    cleaned = cleaned[:4]
+    while len(cleaned) < 4:
+        cleaned.append(default_options[len(cleaned)])
+    return cleaned
+
+
+def _infer_question_concept(question_text: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", str(question_text or "")).lower()
+    tokens = [t for t in text.split() if len(t) > 3]
+    if not tokens:
+        return "Core Concept"
+    return " ".join(tokens[:2]).title()
+
+
+def _normalize_summary_payload(summary_data: dict, include_key_terms: bool) -> dict:
+    if not isinstance(summary_data, dict):
+        summary_data = {}
+
+    summary_content = summary_data.get("summary", "")
+    if isinstance(summary_content, dict):
+        parts = []
+        for section, content in summary_content.items():
+            if content:
+                parts.append(f"## {section}\n{content}")
+        summary_content = "\n\n".join(parts)
+    summary_content = _sanitize_response_text(str(summary_content or "").strip())
+
+    takeaways = summary_data.get("takeaways", [])
+    if not isinstance(takeaways, list):
+        takeaways = []
+    takeaways = [str(item).strip() for item in takeaways if str(item).strip()][:8]
+
+    key_terms = []
+    if include_key_terms:
+        raw_terms = summary_data.get("keyTerms", [])
+        if isinstance(raw_terms, list):
+            for term_item in raw_terms[:12]:
+                if not isinstance(term_item, dict):
+                    continue
+                term = str(term_item.get("term", "")).strip()
+                definition = str(term_item.get("definition", "")).strip()
+                if term and definition:
+                    key_terms.append({"term": term, "definition": definition})
+
+    return {
+        "summary": summary_content,
+        "takeaways": takeaways,
+        "keyTerms": key_terms,
+    }
+
+
+def _quiz_difficulty_instructions(level: str) -> str:
+    profiles = {
+        "easy": (
+            "- Focus on direct recall of key definitions, facts, and simple concepts.\n"
+            "- Use short, clear question wording with one obvious best answer.\n"
+            "- Avoid multi-step reasoning and avoid tricky distractors."
+        ),
+        "medium": (
+            "- Focus on understanding and application, not simple recall.\n"
+            "- Require 1-2 reasoning steps (e.g., interpretation, comparison, choosing best method).\n"
+            "- Use plausible distractors that test common misunderstandings."
+        ),
+        "hard": (
+            "- Focus on analysis, synthesis, and edge cases from the content.\n"
+            "- Require multi-step reasoning or careful discrimination between close options.\n"
+            "- Use strong, close distractors; avoid ambiguity but make questions genuinely challenging."
+        ),
+    }
+    return profiles.get(level, profiles["medium"])
+
+
+def _quiz_format_instructions(question_type: str, difficulty: str) -> str:
+    base = {
+        "mcq": "Generate multiple choice questions with exactly 4 options each. Mark the correct answer with the index (0-3).",
+        "tf": "Generate true/false questions. Set options to ['True','False'] and correctAnswer to 0 (True) or 1 (False).",
+        "fill": "Generate fill-in-the-blank questions with a clear blank. Set options to empty array [] and correctAnswer to 0.",
+        "essay": "Generate essay/theory questions requiring written reasoning. Set options to empty array [] and correctAnswer to 0.",
+    }
+    difficulty_by_type = {
+        "mcq": {
+            "easy": "- Keep stems short and straightforward.\n- Avoid negative wording.\n- Distractors should be clearly wrong for prepared students.",
+            "medium": "- Mix concept understanding with basic application.\n- Distractors should be plausible.\n- Avoid purely definition-only questions.",
+            "hard": "- Use scenario-based or calculation/logic-based stems.\n- Distractors should be very close and require precision.",
+        },
+        "tf": {
+            "easy": "- Statements should be direct and explicit from the text.",
+            "medium": "- Statements should involve interpretation, not exact sentence matching.",
+            "hard": "- Statements should combine multiple facts; students must reason to judge truth.",
+        },
+        "fill": {
+            "easy": "- Blank out high-salience keywords from direct definitions.",
+            "medium": "- Blank out concept relationships or method names in applied contexts.",
+            "hard": "- Blank out terms that require deep context understanding, not surface recall.",
+        },
+        "essay": {
+            "easy": "- Ask for short explanations of core ideas.",
+            "medium": "- Ask students to compare/contrast or apply a concept to a small scenario.",
+            "hard": "- Ask for structured argument/analysis with justification and tradeoffs.",
+        },
+    }
+    per_type = difficulty_by_type.get(question_type, {}).get(difficulty, "")
+    return f"{base.get(question_type, 'Generate questions based on the content')}\n{per_type}".strip()
+
+
 class QuizGenerateAPIView(APIView):
     permission_classes = [IsAuthenticated]
     
@@ -955,7 +1194,9 @@ class QuizGenerateAPIView(APIView):
             question_count = 10
         if question_count < 1:
             question_count = 1
-        difficulty = request.data.get("difficulty", "medium")
+        difficulty = str(request.data.get("difficulty", "medium")).lower().strip()
+        if difficulty not in {"easy", "medium", "hard"}:
+            difficulty = "medium"
         chat_id = request.data.get("chat_id")
 
         profile = _get_payments_profile(request.user)
@@ -978,6 +1219,7 @@ class QuizGenerateAPIView(APIView):
             return Response({"error": "No file uploaded"}, status=400)
         
         uploaded_file = request.FILES['file']
+        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="qa")
         
         # Validate file type
         allowed_types = ['pdf', 'txt', 'doc', 'docx', 'md']
@@ -997,20 +1239,13 @@ class QuizGenerateAPIView(APIView):
                 status=400
             )
         
-        # Limit text length to prevent excessive API costs
-        max_chars = 10000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars]
+        max_chars = max(2000, int(getattr(settings, "QUIZ_SOURCE_MAX_CHARS", 7000)))
+        text_content = _prepare_llm_context(text_content, max_chars)
         
         # Generate quiz using OpenAI
         try:
-            # Create quiz generation prompt based on type
-            type_instructions = {
-                "mcq": "Generate multiple choice questions with 4 options each. Mark the correct answer with the index (0-3).",
-                "tf": "Generate true/false questions. Set correctAnswer to 0 for True, 1 for False.",
-                "fill": "Generate fill-in-the-blank questions. Set options to empty array [] and correctAnswer to 0.",
-                "essay": "Generate essay questions. Set options to empty array [] and correctAnswer to 0."
-            }
+            format_instructions = _quiz_format_instructions(question_type, difficulty)
+            difficulty_instructions = _quiz_difficulty_instructions(difficulty)
             
             prompt = f"""
 You are a study assistant. Based on the following content, generate {question_count} {difficulty} difficulty questions.
@@ -1019,7 +1254,11 @@ Content:
 {text_content}
 
 Question Type: {question_type}
-Instructions: {type_instructions.get(question_type, 'Generate questions based on the content')}
+Difficulty Rules:
+{difficulty_instructions}
+
+Question Format Rules:
+{format_instructions}
 
 IMPORTANT: Return ONLY a valid JSON array with this EXACT structure:
 [
@@ -1028,7 +1267,10 @@ IMPORTANT: Return ONLY a valid JSON array with this EXACT structure:
         "question": "Question text here?",
         "options": ["A", "B", "C", "D"],
         "correctAnswer": 0,
-        "explanation": "Brief explanation"
+        "explanation": "Brief explanation",
+        "concept": "Concept label for this question",
+        "guidance": "Short study direction for this question",
+        "correctText": "Expected answer text for fill/essay (optional for mcq/tf)"
     }}
 ]
 
@@ -1042,12 +1284,12 @@ Only return valid JSON, nothing else.
             
             client = get_openai_client()
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=getattr(settings, "QUIZ_OPENAI_MODEL", "gpt-4o-mini"),
                 messages=[
                     {"role": "system", "content": "You are a helpful study assistant that generates quizzes. Always return valid JSON only. Never use markdown code blocks."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
+                temperature=0.3,
                 max_tokens=2000
             )
             
@@ -1104,45 +1346,52 @@ Only return valid JSON, nothing else.
             normalized_questions = []
             for i, q in enumerate(questions):
                 try:
+                    if not isinstance(q, dict):
+                        continue
                     # Ensure required fields exist with correct types
                     normalized_q = {
                         "id": q.get("id", f"q{i+1}"),
                         "question": str(q.get("question", f"Question {i+1}")),
                         "options": [],
                         "correctAnswer": 0,
-                        "explanation": str(q.get("explanation", ""))
+                        "explanation": str(q.get("explanation", "")),
+                        "concept": str(q.get("concept", "")).strip(),
+                        "guidance": str(q.get("guidance", "")).strip(),
+                        "correctText": str(q.get("correctText", "")).strip(),
                     }
+                    if not normalized_q["concept"]:
+                        normalized_q["concept"] = _infer_question_concept(normalized_q["question"])
+                    if not normalized_q["guidance"]:
+                        normalized_q["guidance"] = "Focus on the concept behind this question and explain why the correct choice fits best."
                     
                     # Handle options based on question type
                     if question_type == "mcq":
-                        opts = q.get("options", [])
-                        if isinstance(opts, list) and len(opts) >= 2:
-                            normalized_q["options"] = [str(opt) for opt in opts[:4]]
-                        else:
-                            # Fallback options
-                            normalized_q["options"] = ["Option A", "Option B", "Option C", "Option D"]
+                        normalized_q["options"] = _normalize_quiz_options(q.get("options", []))
                         
                         # Ensure correctAnswer is valid index
                         if isinstance(q.get("correctAnswer"), int):
                             normalized_q["correctAnswer"] = min(max(q["correctAnswer"], 0), len(normalized_q["options"]) - 1)
                         else:
                             normalized_q["correctAnswer"] = 0
+                        if not normalized_q["correctText"] and normalized_q["options"]:
+                            normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
                     
                     elif question_type == "tf":
                         normalized_q["options"] = ["True", "False"]
                         ca = q.get("correctAnswer")
-                        if ca in [0, 1, "0", "1", True, False, "True", "False"]:
-                            if ca in [0, "0", False, "False"]:
-                                normalized_q["correctAnswer"] = 1  # False is index 1
-                            else:
-                                normalized_q["correctAnswer"] = 0  # True is index 0
+                        if ca in [1, "1", False, "False", "false"]:
+                            normalized_q["correctAnswer"] = 1
                         else:
                             normalized_q["correctAnswer"] = 0
+                        if not normalized_q["correctText"]:
+                            normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
                     
                     else:
                         # fill, essay
                         normalized_q["options"] = []
                         normalized_q["correctAnswer"] = 0
+                        if not normalized_q["correctText"]:
+                            normalized_q["correctText"] = normalized_q["explanation"]
                     
                     normalized_questions.append(normalized_q)
                     logger.debug(f"[QuizGen] Question {i+1}: {normalized_q['question'][:50]}...")
@@ -1173,8 +1422,19 @@ Only return valid JSON, nothing else.
                         "questions": normalized_questions,
                         "difficulty": difficulty,
                         "type": question_type,
+                        "sourceFile": {
+                            "id": persisted_source.id,
+                            "name": persisted_source.file.name.rsplit("/", 1)[-1],
+                            "storage_key": persisted_source.file.name,
+                            "file_type": persisted_source.file_type,
+                        },
                     },
                     context="quiz",
+                )
+                chat_title = _auto_title_feature_chat(
+                    chat,
+                    persisted_source.file.name.rsplit("/", 1)[-1],
+                    "Quiz",
                 )
             
             if not premium_active:
@@ -1185,7 +1445,14 @@ Only return valid JSON, nothing else.
                 "questions": normalized_questions,
                 "type": question_type,
                 "difficulty": difficulty,
-                "count": len(normalized_questions)
+                "count": len(normalized_questions),
+                "source_file": {
+                    "id": persisted_source.id,
+                    "name": persisted_source.file.name.rsplit("/", 1)[-1],
+                    "storage_key": persisted_source.file.name,
+                    "file_type": persisted_source.file_type,
+                },
+                "chat_title": chat_title,
             }, status=200)
             
         except Exception as e:
@@ -1194,6 +1461,95 @@ Only return valid JSON, nothing else.
                 {"error": "Failed to generate quiz. Please try again."},
                 status=500
             )
+
+
+class QuizGradeTextAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        question = str(request.data.get("question", "")).strip()
+        answer = str(request.data.get("answer", "")).strip()
+        question_type = str(request.data.get("questionType", "essay")).lower().strip()
+        difficulty = str(request.data.get("difficulty", "medium")).lower().strip()
+        expected_answer = str(request.data.get("expectedAnswer", "")).strip()
+        explanation = str(request.data.get("explanation", "")).strip()
+        concept = str(request.data.get("concept", "")).strip()
+
+        if question_type not in {"fill", "essay"}:
+            return Response({"error": "Only fill/essay grading is supported."}, status=400)
+        if not question or not answer:
+            return Response({"error": "Question and answer are required."}, status=400)
+
+        if difficulty not in {"easy", "medium", "hard"}:
+            difficulty = "medium"
+
+        prompt = f"""
+You are grading a student answer for a study app.
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "is_correct": true,
+  "score": 0.78,
+  "concept": "short concept label",
+  "guidance": "2-3 sentence actionable study direction",
+  "feedback": "brief explanation of why this score was given"
+}}
+
+Rules:
+- is_correct should be true only if the answer is reasonably correct for the question type/difficulty.
+- score must be a float between 0 and 1.
+- concept should be concise (2-5 words).
+- guidance must help the student improve on this exact concept.
+- feedback must be brief and specific.
+
+Difficulty: {difficulty}
+Question type: {question_type}
+Question: {question}
+Student answer: {answer}
+Reference answer: {expected_answer}
+Reference explanation: {explanation}
+Known concept label: {concept}
+"""
+        try:
+            client = get_openai_client()
+            response = client.chat.completions.create(
+                model=getattr(settings, "QUIZ_OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": "You are a strict but supportive quiz grader. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=350,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            import json
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                start = raw.find("{")
+                end = raw.rfind("}") + 1
+                data = json.loads(raw[start:end]) if start >= 0 and end > start else {}
+
+            is_correct = bool(data.get("is_correct", False))
+            try:
+                score = float(data.get("score", 0.0))
+            except Exception:
+                score = 0.0
+            score = max(0.0, min(1.0, score))
+            concept_out = str(data.get("concept", concept or _infer_question_concept(question))).strip() or _infer_question_concept(question)
+            guidance_out = str(data.get("guidance", "")).strip() or "Review the core concept, then rewrite your answer with one clear example."
+            feedback_out = str(data.get("feedback", "")).strip() or "Answer graded."
+
+            return Response({
+                "is_correct": is_correct,
+                "score": score,
+                "concept": concept_out,
+                "guidance": guidance_out,
+                "feedback": feedback_out,
+            }, status=200)
+        except Exception as e:
+            logger.error(f"Quiz text grading failed: {e}", exc_info=True)
+            return Response({"error": "Failed to grade answer right now."}, status=500)
 
 class SummarizeAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1210,6 +1566,7 @@ class SummarizeAPIView(APIView):
             return Response({"error": "No file uploaded"}, status=400)
         
         uploaded_file = request.FILES['file']
+        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="summary")
         
         # Validate file type
         allowed_types = ['pdf', 'txt', 'doc', 'docx', 'ppt', 'pptx', 'md']
@@ -1236,10 +1593,8 @@ class SummarizeAPIView(APIView):
             "comprehensive": "~500 words"
         }
         
-        # Limit text length to prevent excessive API costs
-        max_chars = 15000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars]
+        max_chars = max(3000, int(getattr(settings, "SUMMARY_SOURCE_MAX_CHARS", 9000)))
+        text_content = _prepare_llm_context(text_content, max_chars)
         
         # Generate summary using OpenAI
         try:
@@ -1270,12 +1625,12 @@ Only return valid JSON, no additional text.
             
             client = get_openai_client()
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=getattr(settings, "SUMMARY_OPENAI_MODEL", "gpt-4o-mini"),
                 messages=[
                     {"role": "system", "content": "You are a helpful study assistant that creates summaries. Always return valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,
+                temperature=0.2,
                 max_tokens=1500
             )
 
@@ -1300,19 +1655,11 @@ Only return valid JSON, no additional text.
                     else:
                         raise ValueError("Could not parse summary from response")
             
-            # Handle case where summary is returned as an object with section keys
-            # (e.g., {"Introduction": "...", "Conclusion": "..."})
-            summary_content = summary_data.get("summary", "")
-            if isinstance(summary_content, dict):
-                # Convert dict to formatted string
-                formatted_parts = []
-                for section, content in summary_content.items():
-                    if content:
-                        formatted_parts.append(f"## {section}\n{content}")
-                summary_content = "\n\n".join(formatted_parts)
-            summary_content = _sanitize_response_text(summary_content)
+            normalized_summary = _normalize_summary_payload(summary_data, bool(include_key_terms))
+            summary_content = normalized_summary["summary"]
 
             chat = _get_chat_for_write(request.user, chat_id)
+            chat_title = None
             if chat:
                 ChatHistory.objects.create(
                     chat=chat,
@@ -1324,20 +1671,38 @@ Only return valid JSON, no additional text.
                     response_metadata={
                         "title": "Document Summary",
                         "summary": summary_content,
-                        "takeaways": summary_data.get("takeaways", []),
-                        "keyTerms": summary_data.get("keyTerms", []),
+                        "takeaways": normalized_summary["takeaways"],
+                        "keyTerms": normalized_summary["keyTerms"],
                         "length": length,
                         "format": format_type,
+                        "sourceFile": {
+                            "id": persisted_source.id,
+                            "name": persisted_source.file.name.rsplit("/", 1)[-1],
+                            "storage_key": persisted_source.file.name,
+                            "file_type": persisted_source.file_type,
+                        },
                     },
                     context="summary",
+                )
+                chat_title = _auto_title_feature_chat(
+                    chat,
+                    persisted_source.file.name.rsplit("/", 1)[-1],
+                    "Summary",
                 )
 
             return Response({
                 "summary": summary_content,
-                "takeaways": summary_data.get("takeaways", []),
-                "keyTerms": summary_data.get("keyTerms", []),
+                "takeaways": normalized_summary["takeaways"],
+                "keyTerms": normalized_summary["keyTerms"],
                 "length": length,
-                "format": format_type
+                "format": format_type,
+                "source_file": {
+                    "id": persisted_source.id,
+                    "name": persisted_source.file.name.rsplit("/", 1)[-1],
+                    "storage_key": persisted_source.file.name,
+                    "file_type": persisted_source.file_type,
+                },
+                "chat_title": chat_title,
             }, status=200)
             
         except Exception as e:

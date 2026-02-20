@@ -35,6 +35,7 @@ import tempfile
 from django.http import HttpResponse, FileResponse, JsonResponse
 import os
 import subprocess
+from uuid import uuid4
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.core.files.storage import default_storage
@@ -98,6 +99,35 @@ def _estimate_tts_minutes(text: str, speed: float | None = None) -> float:
         except (TypeError, ValueError):
             pass
     return max(minutes, 0.01)
+
+
+def _is_default_chat_title(title: str) -> bool:
+    normalized = str(title or "").strip().lower()
+    return normalized in {"", "new chat", "new study session", "untitled chat"}
+
+
+def _build_feature_chat_title(source_name: str, suffix: str) -> str:
+    filename = str(source_name or "").rsplit("/", 1)[-1]
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    stem = re.sub(r"[_\\-]+", " ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    if not stem:
+        stem = "Study Material"
+    if len(stem) > 70:
+        stem = f"{stem[:67].rstrip()}..."
+    title = f"{stem} {suffix}".strip()
+    return title[:255]
+
+
+def _auto_title_feature_chat(chat: Chat | None, source_name: str, suffix: str) -> str | None:
+    if not chat:
+        return None
+    if not _is_default_chat_title(chat.title):
+        return chat.title
+    new_title = _build_feature_chat_title(source_name, suffix)
+    chat.title = new_title
+    chat.save()
+    return chat.title
 
 class ScoreQuestionsAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -253,7 +283,7 @@ class GenerateAudioAPIView(APIView):
             )
 
             audio_bytes = response.read() if hasattr(response, "read") else response.content
-            audio_path = default_storage.save("tts_output.mp3", ContentFile(audio_bytes))
+            audio_path = default_storage.save(f"tts_output_{uuid4().hex}.mp3", ContentFile(audio_bytes))
             audio_url = default_storage.url(audio_path)
 
             if not premium_active:
@@ -341,7 +371,7 @@ class FileUploadAPIView(APIView):
                 )
 
             file_obj = File.objects.create(user=request.user, file=uploaded_file)
-            mime_type, _ = mimetypes.guess_type(file_obj.file.path)
+            mime_type, _ = mimetypes.guess_type(file_obj.file.name)
             file_obj.mime_type = mime_type or "application/octet-stream"
             file_obj.save()
             serializer = FileSerializer(file_obj)
@@ -510,7 +540,8 @@ class FileSummaryAPIView(APIView):
                 return Response({"error": "File too large. Max 10MB."}, status=400)
             from PyPDF2 import PdfReader
             if file_obj.file.name.lower().endswith(".pdf"):
-                reader = PdfReader(file_obj.file.path)
+                with file_obj.file.open("rb") as pdf_file:
+                    reader = PdfReader(pdf_file)
                 if len(reader.pages) > 20:
                     return Response({"error": "PDF too long (max 20 pages)."}, status=400)
             is_image_or_pdf = file_obj.file.name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"))
@@ -687,6 +718,7 @@ class TranscribeAPIView(APIView):
                     language=None,
                 )
                 chat = _get_chat_for_write(request.user, chat_id)
+                chat_title = None
                 if chat:
                     notes = _build_notes_from_transcription(transcription_text)
                     duration_display = None
@@ -712,10 +744,13 @@ class TranscribeAPIView(APIView):
                         },
                         context="notes",
                     )
+                    source_label = filename or "Voice Note"
+                    chat_title = _auto_title_feature_chat(chat, source_label, "Notes")
                 return Response({
                     "success": True,
                     "transcription": transcription_text,
-                    "transcription_id": transcription_obj.id
+                    "transcription_id": transcription_obj.id,
+                    "chat_title": chat_title,
                 }, status=status.HTTP_200_OK)
             except Exception as transcribe_e:
                 logger.error(f"Transcription failed: {transcribe_e}", exc_info=True)

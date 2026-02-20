@@ -2,6 +2,7 @@ import logging
 import os
 import json
 import re
+from uuid import uuid4
 from openai import OpenAI
 from django.conf import settings
 from PyPDF2 import PdfReader
@@ -27,43 +28,65 @@ def get_openai_client():
 
 
 def build_absolute_media_url(relative_url):
+    if relative_url.startswith("http://") or relative_url.startswith("https://"):
+        return relative_url
     domain = getattr(settings, 'SITE_DOMAIN', None)
     if not domain:
         raise RuntimeError("SITE_DOMAIN setting is not configured. Set it in your environment or settings.py.")
     return domain.rstrip('/') + relative_url
 
 
+def _read_file_bytes(file_obj) -> bytes:
+    if hasattr(file_obj, "open"):
+        file_obj.open("rb")
+        try:
+            return file_obj.read()
+        finally:
+            try:
+                file_obj.close()
+            except Exception:
+                pass
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    return file_obj.read()
+
+
+def _file_name(file_obj) -> str:
+    return getattr(file_obj, "name", "") or "uploaded_file"
+
+
 def summarize_file_with_vision(file_obj):
-    path = file_obj.file.path
-    mime, _ = guess_type(path)
+    source = getattr(file_obj, "file", file_obj)
+    file_name = _file_name(source)
+    file_bytes = _read_file_bytes(source)
+    mime, _ = guess_type(file_name)
     if mime in ("image/png", "image/jpeg", "image/webp", "image/gif"):
-        return _summarize_image_public(path)
+        return _summarize_image_public(file_name, file_bytes)
     elif mime == "application/pdf":
-        return _summarize_pdf_public(path)
+        return _summarize_pdf_public(file_name, file_bytes)
     else:
-        text = extract_text_from_file(file_obj)
+        text = extract_text_from_file(source)
         if not text.strip():
             return None, "Unsupported file type and text extraction failed."
         return summarize_text(text), None
 
 
-def _summarize_image_public(path):
-    with open(path, "rb") as f:
-        filename = f"summary_vision_{os.path.basename(path)}"
-        image_path = default_storage.save(filename, f)
-        relative_url = default_storage.url(image_path)
-        image_url = build_absolute_media_url(relative_url)
+def _summarize_image_public(file_name: str, file_bytes: bytes):
+    filename = f"summary_vision_{uuid4().hex}_{os.path.basename(file_name)}"
+    image_path = default_storage.save(filename, ContentFile(file_bytes))
+    relative_url = default_storage.url(image_path)
+    image_url = build_absolute_media_url(relative_url)
     return _vision_chat_public(image_url)
 
 
-def _summarize_pdf_public(path):
-    images = convert_from_bytes(open(path, "rb").read(), fmt="PNG")
+def _summarize_pdf_public(file_name: str, file_bytes: bytes):
+    images = convert_from_bytes(file_bytes, fmt="PNG")
     summaries, warnings = [], []
     for i, img in enumerate(images):
         buf = BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
-        filename = f"summary_vision_pdf_{i}_{os.path.basename(path)}.png"
+        filename = f"summary_vision_pdf_{i}_{uuid4().hex}_{os.path.basename(file_name)}.png"
         img_path = default_storage.save(filename, ContentFile(buf.read()))
         relative_url = default_storage.url(img_path)
         image_url = build_absolute_media_url(relative_url)
@@ -124,16 +147,17 @@ def transcribe_audio(file_path: str) -> str:
 
 def extract_text_from_file(file_obj) -> str:
     try:
-        file_path = file_obj.path
-        ext = os.path.splitext(file_path)[1].lower()
+        file_name = _file_name(file_obj)
+        ext = os.path.splitext(file_name)[1].lower()
+        file_bytes = _read_file_bytes(file_obj)
         if ext == ".pdf":
-            reader = PdfReader(file_path)
+            reader = PdfReader(BytesIO(file_bytes))
             return "\n".join(page.extract_text() or "" for page in reader.pages)
         elif ext == ".docx":
-            doc = Document(file_path)
+            doc = Document(BytesIO(file_bytes))
             return "\n".join(paragraph.text for paragraph in doc.paragraphs)
         elif ext == ".pptx":
-            ppt = Presentation(file_path)
+            ppt = Presentation(BytesIO(file_bytes))
             text_runs = []
             for slide in ppt.slides:
                 for shape in slide.shapes:
@@ -196,12 +220,13 @@ def generate_questions_from_text(
 
 
 def extract_text_and_images_from_file(file_obj):
-    path = file_obj.path
-    ext = os.path.splitext(path)[1].lower()
+    file_name = _file_name(file_obj)
+    ext = os.path.splitext(file_name)[1].lower()
+    file_bytes = _read_file_bytes(file_obj)
     images = {}
     text = ""
     if ext == ".pdf":
-        reader = PdfReader(path)
+        reader = PdfReader(BytesIO(file_bytes))
         for i, page in enumerate(reader.pages):
             text += page.extract_text() or ""
         for page_index, page in enumerate(reader.pages):
@@ -222,7 +247,7 @@ def extract_text_and_images_from_file(file_obj):
             except Exception as e:
                 logger.warning(f"PDF image extract failed: {e}")
     elif ext == ".docx":
-        doc = Document(path)
+        doc = Document(BytesIO(file_bytes))
         text = "\n".join(p.text for p in doc.paragraphs)
         rels = getattr(doc.part, "_rels", {})
         for rel in rels:
@@ -241,7 +266,7 @@ def extract_text_and_images_from_file(file_obj):
                 except Exception as e:
                     logger.warning(f"DOCX image extract failed: {e}")
     elif ext == ".pptx":
-        ppt = Presentation(path)
+        ppt = Presentation(BytesIO(file_bytes))
         for slide in ppt.slides:
             for shape in slide.shapes:
                 if hasattr(shape, "text"):

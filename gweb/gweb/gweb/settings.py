@@ -9,17 +9,13 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-# Load .env files - check both gweb/gweb/.env and project root .env
+# Load only backend-local .env (gweb/gweb/.env)
 BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_FILE_PATH = BASE_DIR / 'gweb' / '.env'  # Correct path to .env file
-PROJECT_ROOT = BASE_DIR.parent.parent  # Go up to GLINAX-main
-ROOT_ENV_FILE = PROJECT_ROOT / '.env'
+ENV_FILE_PATH = BASE_DIR / '.env'
 
 print(f"[DEBUG] Loading env from: {ENV_FILE_PATH}")
-# Load from gweb/gweb/.env first, then override with root .env if it exists
+# Load only gweb/gweb/.env
 load_dotenv(ENV_FILE_PATH)
-print(f"[DEBUG] Loading env from: {ROOT_ENV_FILE} (override=True)")
-load_dotenv(ROOT_ENV_FILE, override=True)
 
 # Debug: print database config
 print(f"[DEBUG] DATABASE_URL in env: {os.getenv('DATABASE_URL')}")
@@ -31,6 +27,26 @@ if not SECRET_KEY:
 
 SITE_DOMAIN = os.getenv("SITE_DOMAIN", "localhost:3000")
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
+USE_R2_STORAGE = os.getenv('USE_R2_STORAGE', 'false').lower() == 'true'
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+QUIZ_SOURCE_MAX_CHARS = _env_int("QUIZ_SOURCE_MAX_CHARS", 7000)
+SUMMARY_SOURCE_MAX_CHARS = _env_int("SUMMARY_SOURCE_MAX_CHARS", 9000)
+CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-4o-mini")
+TITLE_OPENAI_MODEL = os.getenv("TITLE_OPENAI_MODEL", "gpt-4o-mini")
+QUIZ_OPENAI_MODEL = os.getenv("QUIZ_OPENAI_MODEL", "gpt-4o-mini")
+SUMMARY_OPENAI_MODEL = os.getenv("SUMMARY_OPENAI_MODEL", "gpt-4o-mini")
+TTS_OPENAI_MODEL = os.getenv("TTS_OPENAI_MODEL", "gpt-4o-mini-tts")
 
 def _normalize_host(value: str) -> str:
     host = value.strip()
@@ -76,8 +92,10 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders'
+    'corsheaders',
 ]
+if USE_R2_STORAGE:
+    INSTALLED_APPS.append('storages')
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 DEFAULT_FROM_EMAIL = 'no-reply@glinax.com'
@@ -136,7 +154,6 @@ CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS.copy()
 # For development - allow localhost:8000 (the backend itself)
 CORS_ALLOWED_ORIGINS.append("http://localhost:8000")
 CORS_ALLOWED_ORIGINS.append("http://127.0.0.1:8000")
-2
 from datetime import timedelta
 
 LOGGING = {
@@ -160,24 +177,31 @@ LOGGING = {
     },
     "root": {
         "handlers": ["console"],
-        "level": "DEBUG",
+        "level": os.getenv("LOG_LEVEL", "INFO"),
     },
     "loggers": {
         "django": {
             "handlers": ["console"],
-            "level": "INFO",
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
             "propagate": True,
         },
         "chat": {
             "handlers": ["console"],
-            "level": "DEBUG",
+            "level": os.getenv("CHAT_LOG_LEVEL", "INFO"),
             "propagate": False,
         },
         "g_auth": {
             "handlers": ["console"],
-            "level": "DEBUG",
+            "level": os.getenv("G_AUTH_LOG_LEVEL", "INFO"),
             "propagate": False,
         },
+        "openai": {"level": os.getenv("OPENAI_LOG_LEVEL", "WARNING")},
+        "httpx": {"level": os.getenv("HTTPX_LOG_LEVEL", "WARNING")},
+        "httpcore": {"level": os.getenv("HTTPCORE_LOG_LEVEL", "WARNING")},
+        "urllib3": {"level": os.getenv("URLLIB3_LOG_LEVEL", "WARNING")},
+        "boto3": {"level": os.getenv("BOTO3_LOG_LEVEL", "WARNING")},
+        "botocore": {"level": os.getenv("BOTOCORE_LOG_LEVEL", "WARNING")},
+        "s3transfer": {"level": os.getenv("S3TRANSFER_LOG_LEVEL", "WARNING")},
     },
 }
 
@@ -258,8 +282,47 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+if USE_R2_STORAGE:
+    R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID', '')
+    R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY', '')
+    R2_BUCKET_NAME = os.getenv('R2_BUCKET_NAME', '')
+    R2_ENDPOINT_URL = os.getenv('R2_ENDPOINT_URL', '')
+
+    missing_r2 = [
+        name for name, value in (
+            ('R2_ACCESS_KEY_ID', R2_ACCESS_KEY_ID),
+            ('R2_SECRET_ACCESS_KEY', R2_SECRET_ACCESS_KEY),
+            ('R2_BUCKET_NAME', R2_BUCKET_NAME),
+            ('R2_ENDPOINT_URL', R2_ENDPOINT_URL),
+        ) if not value
+    ]
+    if missing_r2:
+        raise RuntimeError(
+            f"USE_R2_STORAGE=true but missing required env vars: {', '.join(missing_r2)}"
+        )
+
+    AWS_ACCESS_KEY_ID = R2_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY = R2_SECRET_ACCESS_KEY
+    AWS_STORAGE_BUCKET_NAME = R2_BUCKET_NAME
+    AWS_S3_ENDPOINT_URL = R2_ENDPOINT_URL
+    AWS_S3_REGION_NAME = 'auto'
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+    AWS_S3_ADDRESSING_STYLE = 'path'
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_S3_FILE_OVERWRITE = False
+
+    STORAGES = {
+        'default': {
+            'BACKEND': 'gweb.storage_backends.R2MediaStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        },
+    }
+else:
+    MEDIA_URL = '/media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

@@ -38,12 +38,26 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
 
     if (!isOpen) return null;
 
+    const activeText = inputMode === "text" ? text : "";
+    const activeFile = inputMode === "file" ? uploadedFile : null;
+    const isSubmitDisabled = (!activeText && !activeFile) || isGenerating;
+
+    const handleClose = () => {
+        setSubmitError("");
+        setIsGenerating(false);
+        setInputMode("text");
+        setText("");
+        setUploadedFile(null);
+        setSelectedVoice("nova");
+        onClose();
+    };
+
     const handleGenerate = async () => {
         setSubmitError("");
         setIsGenerating(true);
         try {
-            await onGenerate(text, selectedVoice, uploadedFile);
-            onClose();
+            await onGenerate(activeText, selectedVoice, activeFile);
+            handleClose();
         } catch (error: unknown) {
             setSubmitError(error instanceof Error ? error.message : "Failed to generate audio.");
         } finally {
@@ -77,7 +91,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
             {/* Backdrop */}
             <div
                 className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-                onClick={onClose}
+                onClick={handleClose}
             />
 
             {/* Modal */}
@@ -94,7 +108,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                         </div>
                     </div>
                     <button
-                        onClick={onClose}
+                        onClick={handleClose}
                         className="p-1.5 hover:bg-muted/50 rounded-full transition-colors text-muted-foreground hover:text-foreground"
                     >
                         <X className="w-4 h-4" />
@@ -106,7 +120,11 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                     {/* Input Mode Toggle */}
                     <div className="flex p-1 bg-muted/50 rounded-lg w-full">
                         <button
-                            onClick={() => setInputMode("text")}
+                            onClick={() => {
+                                setInputMode("text");
+                                setUploadedFile(null);
+                                setSubmitError("");
+                            }}
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all",
                                 inputMode === "text" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
@@ -116,7 +134,11 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                             Type Text
                         </button>
                         <button
-                            onClick={() => setInputMode("file")}
+                            onClick={() => {
+                                setInputMode("file");
+                                setText("");
+                                setSubmitError("");
+                            }}
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all",
                                 inputMode === "file" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
@@ -206,16 +228,16 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                 <div className="p-4 border-t border-border/50 bg-muted/20 flex items-center justify-between">
                     <div>
                         <div className="text-[10px] text-muted-foreground font-medium pl-1">
-                            {text.length > 0 ? `${text.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                            {activeText.length > 0 ? `${activeText.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
                         </div>
                         {submitError && <p className="text-xs text-red-400 mt-1">{submitError}</p>}
                     </div>
                     <button
                         onClick={handleGenerate}
-                        disabled={!text && !uploadedFile || isGenerating}
+                        disabled={isSubmitDisabled}
                         className={cn(
                             "px-4 py-2 bg-primary text-primary-foreground rounded-lg text-xs font-semibold flex items-center gap-2 transition-all shadow-lg shadow-primary/10",
-                            (!text && !uploadedFile) || isGenerating
+                            isSubmitDisabled
                                 ? "opacity-50 cursor-not-allowed grayscale"
                                 : "hover:shadow-primary/25 hover:scale-[1.02]"
                         )}

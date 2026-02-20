@@ -43,6 +43,7 @@ export default function Home() {
     const chatId = useDataStore((state) => state.chatId);
     const createSession = useDataStore((state) => state.createSession);
     const updateSession = useDataStore((state) => state.updateSession);
+    const updateSessionByChatId = useDataStore((state) => state.updateSessionByChatId);
     const loadChatHistory = useDataStore((state) => state.loadChatHistory);
     const { showToast } = useToast();
 
@@ -117,18 +118,27 @@ export default function Home() {
         try {
             const resolvedChatId = await ensureChatId();
             let res;
+            const cleanedText = typeof text === "string" ? text.trim() : "";
 
-            if (file) {
+            if (cleanedText.length > 0) {
+                res = await api.post("/chat/audio/generate/", {
+                    text: cleanedText,
+                    voice,
+                    chat_id: resolvedChatId,
+                });
+            } else if (file) {
                 const formData = new FormData();
                 formData.append("file", file);
                 formData.append("voice", voice);
                 if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
                 res = await api.post("/chat/audio/generate/", formData);
             } else {
-                res = await api.post("/chat/audio/generate/", {
-                    text,
-                    voice,
-                    chat_id: resolvedChatId,
+                throw new Error("Please enter text or upload a file.");
+            }
+            if (resolvedChatId && res.data?.chat_title) {
+                updateSessionByChatId(resolvedChatId, {
+                    title: String(res.data.chat_title),
+                    lastMessageAt: new Date(),
                 });
             }
 
@@ -199,6 +209,12 @@ export default function Home() {
             if (durationMs) formData.append("duration_ms", String(durationMs));
 
             const res = await api.post("/transcribe/", formData);
+            if (resolvedChatId && res.data?.chat_title) {
+                updateSessionByChatId(resolvedChatId, {
+                    title: String(res.data.chat_title),
+                    lastMessageAt: new Date(),
+                });
+            }
 
             removeMessage(loadingId);
 
@@ -261,6 +277,12 @@ export default function Home() {
             if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
             const res = await api.post("/chat/quiz/generate/", formData);
+            if (resolvedChatId && res.data?.chat_title) {
+                updateSessionByChatId(resolvedChatId, {
+                    title: String(res.data.chat_title),
+                    lastMessageAt: new Date(),
+                });
+            }
 
             // Replace loading message with actual quiz
             removeMessage(loadingId);
@@ -320,6 +342,12 @@ export default function Home() {
             if (resolvedChatId) formData.append("chat_id", String(resolvedChatId));
 
             const res = await api.post("/chat/summarize/", formData);
+            if (resolvedChatId && res.data?.chat_title) {
+                updateSessionByChatId(resolvedChatId, {
+                    title: String(res.data.chat_title),
+                    lastMessageAt: new Date(),
+                });
+            }
 
             // Replace loading message with actual summary
             removeMessage(loadingId);

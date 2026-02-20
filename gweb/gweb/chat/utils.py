@@ -1,6 +1,7 @@
 from openai import OpenAI
 import os
 import logging
+from django.conf import settings
 from django.core.files.base import ContentFile
 from .models import TextToSpeech
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ def generate_chat_title_from_openai(messages: list[str]):
     try:
         client = get_openai_client()
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=getattr(settings, "TITLE_OPENAI_MODEL", "gpt-4o-mini"),
             messages=messages + [
                 {
                     "role": "system",
@@ -53,7 +54,7 @@ def text_to_audio(user, text):
     try:
         client = get_openai_client()
         response = client.audio.speech.create(
-            model="tts-1",
+            model=getattr(settings, "TTS_OPENAI_MODEL", "gpt-4o-mini-tts"),
             voice="alloy",
             input=text
         )

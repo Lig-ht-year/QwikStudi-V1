@@ -52,6 +52,8 @@ export function ChatInput() {
     const updateSession = useDataStore((state) => state.updateSession);
     const updateSessionByChatId = useDataStore((state) => state.updateSessionByChatId);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
+    const explainPrompt = useUIStore((state) => state.explainPrompt);
+    const clearExplainPrompt = useUIStore((state) => state.clearExplainPrompt);
     const setIsLoading = useUIStore((state) => state.setIsLoading);
     const language = useDataStore((state) => state.language);
     const t = translations[language];
@@ -66,6 +68,7 @@ export function ChatInput() {
     const [isRecording, setIsRecording] = useState(false);
     const hasInputContent = input.trim().length > 0 || files.length > 0;
     const isBusy = isSending || isLoading;
+    const isComposerBlocked = isBusy || isLimitExceeded;
 
     // Initialize guest_id on mount (use UUID format for Django compatibility)
     useEffect(() => {
@@ -100,7 +103,16 @@ export function ChatInput() {
         }
     }, [isBusy]);
 
+    useEffect(() => {
+        if (!isLimitExceeded) return;
+        setShowAttachMenu(false);
+        setShowFeatures(false);
+        setIsRecording(false);
+        setFiles([]);
+    }, [isLimitExceeded]);
+
     const toggleRecording = () => {
+        if (isComposerBlocked) return;
         if (isRecording) {
             recognitionRef.current?.stop();
             setIsRecording(false);
@@ -176,8 +188,22 @@ export function ChatInput() {
         autoResize();
     }, [input]);
 
+    useEffect(() => {
+        if (!explainPrompt) return;
+        setInput(explainPrompt);
+        clearExplainPrompt();
+        requestAnimationFrame(() => {
+            textareaRef.current?.focus();
+            autoResize();
+        });
+    }, [explainPrompt, clearExplainPrompt]);
+
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
+        if (isLimitExceeded) {
+            showToast("Guest limit reached. Log in to continue chatting.", "info");
+            return;
+        }
         if (!input.trim() && files.length === 0) return;
         if (isBusy) return;
 
@@ -363,12 +389,14 @@ export function ChatInput() {
 
     // Drag and drop handlers
     const handleDragEnter = (e: React.DragEvent) => {
+        if (isComposerBlocked) return;
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(true);
     };
 
     const handleDragLeave = (e: React.DragEvent) => {
+        if (isComposerBlocked) return;
         e.preventDefault();
         e.stopPropagation();
         // Only set dragging to false if we're leaving the container entirely
@@ -378,11 +406,13 @@ export function ChatInput() {
     };
 
     const handleDragOver = (e: React.DragEvent) => {
+        if (isComposerBlocked) return;
         e.preventDefault();
         e.stopPropagation();
     };
 
     const handleDrop = (e: React.DragEvent) => {
+        if (isComposerBlocked) return;
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(false);
@@ -411,6 +441,7 @@ export function ChatInput() {
     };
 
     const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (isComposerBlocked) return;
         const selectedFiles = e.target.files;
         if (selectedFiles) {
             // Filter files by size limit
@@ -431,6 +462,12 @@ export function ChatInput() {
     };
 
     const openProtectedModal = (modal: 'quiz' | 'summarize' | 'tts' | 'stt') => {
+        if (isLimitExceeded) {
+            showToast("Guest limit reached. Log in to continue.", "info");
+            setShowFeatures(false);
+            router.push("/login");
+            return;
+        }
         if (!isLoggedIn) {
             showToast("Please log in or register to use this feature.", "error");
             setShowFeatures(false);
@@ -445,8 +482,18 @@ export function ChatInput() {
         <div className="w-full pb-4">
             {/* Limit Exceeded Banner */}
             {isLimitExceeded && (
-                <div className="mb-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 animate-in fade-in slide-in-from-top-2">
-                    <div className="flex items-start gap-3">
+                <div className="mb-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/25 animate-in fade-in slide-in-from-top-2 relative">
+                    <button
+                        onClick={() => {
+                            setIsLimitExceeded(false);
+                            setLimitMessage("");
+                        }}
+                        className="absolute right-3 top-3 p-1.5 rounded-lg hover:bg-amber-500/10 text-amber-500/80 hover:text-amber-500 transition-colors"
+                        aria-label="Dismiss limit message"
+                    >
+                        <X className="w-4 h-4" />
+                    </button>
+                    <div className="flex items-start gap-3 pr-8">
                         <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center flex-shrink-0">
                             <svg className="w-4 h-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -461,20 +508,11 @@ export function ChatInput() {
                             </p>
                             <Link
                                 href="/login"
-                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-500 text-sm font-medium transition-colors"
+                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-500 text-sm font-semibold transition-colors"
                             >
                                 {t.loginToContinue}
                             </Link>
                         </div>
-                        <button
-                            onClick={() => {
-                                setIsLimitExceeded(false);
-                                setLimitMessage("");
-                            }}
-                            className="p-1 rounded-lg hover:bg-amber-500/10 text-amber-500/70 hover:text-amber-500 transition-colors"
-                        >
-                            <X className="w-4 h-4" />
-                        </button>
                     </div>
                 </div>
             )}
@@ -549,11 +587,11 @@ export function ChatInput() {
                     <div className="relative md:hidden">
                         <button
                             onClick={() => setShowAttachMenu(!showAttachMenu)}
-                            disabled={isBusy}
+                            disabled={isComposerBlocked}
                             aria-label="Attach files"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                isBusy
+                                isComposerBlocked
                                     ? "text-muted-foreground/30 cursor-not-allowed"
                                     : "",
                                 showAttachMenu
@@ -595,11 +633,11 @@ export function ChatInput() {
                     {/* Desktop: Plus Button - Opens file picker directly */}
                     <button
                         onClick={() => fileInputRef.current?.click()}
-                        disabled={isBusy}
+                        disabled={isComposerBlocked}
                         aria-label="Attach files"
                         className={cn(
                             "hidden md:block p-2.5 rounded-full transition-all duration-200",
-                            isBusy
+                            isComposerBlocked
                                 ? "text-muted-foreground/30 cursor-not-allowed"
                                 : "text-muted-foreground hover:text-foreground hover:bg-white/5"
                         )}
@@ -610,10 +648,10 @@ export function ChatInput() {
                     {/* Tools Button - Desktop only */}
                     <button
                         onClick={() => setShowFeatures(!showFeatures)}
-                        disabled={isBusy}
+                        disabled={isComposerBlocked}
                         className={cn(
                             "hidden md:flex items-center gap-1.5 px-3 py-2 rounded-full transition-all",
-                            isBusy
+                            isComposerBlocked
                                 ? "text-muted-foreground/30 cursor-not-allowed"
                                 : "",
                             showFeatures
@@ -636,8 +674,14 @@ export function ChatInput() {
                         value={input}
                         onChange={handleInput}
                         onKeyDown={handleKeyDown}
-                        placeholder={isBusy ? "QwikStudi is responding..." : (t.messagePlaceholder || "Message QwikStudi...")}
-                        disabled={isBusy}
+                        placeholder={
+                            isLimitExceeded
+                                ? "Chat limit reached. Log in to continue."
+                                : isBusy
+                                    ? "QwikStudi is responding..."
+                                    : (t.messagePlaceholder || "Message QwikStudi...")
+                        }
+                        disabled={isComposerBlocked}
                         className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-sm max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
                     />
 
@@ -646,10 +690,10 @@ export function ChatInput() {
                         {/* Mic Button - Visible on all screens */}
                         <button
                             onClick={toggleRecording}
-                            disabled={isBusy}
+                            disabled={isComposerBlocked}
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                isBusy
+                                isComposerBlocked
                                     ? "text-muted-foreground/30 cursor-not-allowed"
                                     : "",
                                 isRecording
@@ -667,11 +711,11 @@ export function ChatInput() {
                         {/* Send Button */}
                         <button
                             onClick={handleSubmit}
-                            disabled={!hasInputContent || isBusy}
+                            disabled={!hasInputContent || isComposerBlocked}
                             aria-label="Send message"
                             className={cn(
                                 "p-2.5 rounded-full transition-all duration-200",
-                                hasInputContent && !isBusy
+                                hasInputContent && !isComposerBlocked
                                     ? "text-primary hover:bg-primary/10"
                                     : "text-muted-foreground/30 cursor-not-allowed"
                             )}

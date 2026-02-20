@@ -21,6 +21,11 @@ interface UIState {
     activeModal: ModalType;
     setActiveModal: (modal: ModalType) => void;
 
+    // Composer quick prompt
+    explainPrompt: string;
+    setExplainPrompt: (prompt: string) => void;
+    clearExplainPrompt: () => void;
+
     // Mobile Menu
     isMobileMenuOpen: boolean;
     setIsMobileMenuOpen: (isOpen: boolean) => void;
@@ -39,6 +44,11 @@ export const useUIStore = create<UIState>()((set) => ({
     // Modal
     activeModal: null,
     setActiveModal: (activeModal) => set({ activeModal }),
+
+    // Composer quick prompt
+    explainPrompt: "",
+    setExplainPrompt: (explainPrompt) => set({ explainPrompt }),
+    clearExplainPrompt: () => set({ explainPrompt: "" }),
 
     // Mobile Menu
     isMobileMenuOpen: false,

@@ -6,7 +6,7 @@ from .views import (
     ChatDetailView, EmailShareAPIView,
     ListCollaboratorsAPIView, ApproveCollaborationAPIView,
     PendingCollaborationsAPIView, ListUsersAPIView, RejectCollaborationAPIView,
-    TextToAudioView, AudioFileByIdView, QuizGenerateAPIView, SummarizeAPIView
+    TextToAudioView, AudioFileByIdView, QuizGenerateAPIView, QuizGradeTextAPIView, SummarizeAPIView
 
 )
 
@@ -16,6 +16,7 @@ urlpatterns = [
     path('list/', ChatListAPIView.as_view(), name='chat-list'),
     path('start/', StartNewChatAPIView.as_view(), name='chat-start'),
     path('quiz/generate/', QuizGenerateAPIView.as_view(), name='quiz-generate'),
+    path('quiz/grade-text/', QuizGradeTextAPIView.as_view(), name='quiz-grade-text'),
     path('summarize/', SummarizeAPIView.as_view(), name='summarize'),
 
     # Single chat

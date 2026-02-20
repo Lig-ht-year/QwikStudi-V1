@@ -24,7 +24,8 @@ import {
     Download,
     Check,
     AlertTriangle,
-    Loader2
+    Loader2,
+    X
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { cn, formatDisplayName } from "@/lib/utils";
@@ -253,107 +254,125 @@ function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <div className="w-full max-w-md bg-background rounded-3xl border border-white/10 shadow-2xl overflow-hidden">
-                <div className="p-6 text-center">
-                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center mx-auto mb-4">
-                        <Crown className="w-8 h-8 text-primary" />
-                    </div>
-                    <h2 className="text-2xl font-bold mb-2">{t.upgradeToPro}</h2>
-                    <p className="text-muted-foreground mb-6">
-                        {t.upgradeDescription}
-                    </p>
-
-                    <div className="bg-white/5 rounded-2xl p-4 mb-6 space-y-3">
+        <div
+            className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[2px] p-4"
+            onClick={onClose}
+        >
+            <div className="h-full w-full flex items-center justify-center">
+                <div
+                    className="w-full max-w-md max-h-[88vh] overflow-hidden rounded-3xl border border-white/15 bg-background/95 shadow-[0_30px_80px_rgba(0,0,0,0.45)]"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className="relative p-6 text-center overflow-y-auto max-h-[88vh]">
+                        <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-primary/10 to-transparent" />
                         <button
-                            type="button"
-                            onClick={() => setSelectedPlan("monthly")}
-                            className={cn(
-                                "w-full text-left rounded-xl border p-4 transition-colors",
-                                selectedPlan === "monthly"
-                                    ? "border-primary bg-primary/10"
-                                    : "border-white/10 hover:border-white/20"
-                            )}
+                            onClick={onClose}
+                            className="absolute right-5 top-5 z-10 p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-white/10 transition-colors"
+                            aria-label="Close upgrade modal"
                         >
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <p className="font-semibold">Monthly Pro</p>
-                                    <p className="text-sm text-muted-foreground">GHS 30/month</p>
-                                </div>
-                                {selectedPlan === "monthly" && <Check className="w-5 h-5 text-primary" />}
-                            </div>
+                            <X className="w-4 h-4" />
                         </button>
-                        <button
-                            type="button"
-                            onClick={() => setSelectedPlan("annual")}
-                            className={cn(
-                                "w-full text-left rounded-xl border p-4 transition-colors",
-                                selectedPlan === "annual"
-                                    ? "border-primary bg-primary/10"
-                                    : "border-white/10 hover:border-white/20"
-                            )}
-                        >
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <p className="font-semibold">Annual Pro</p>
-                                    <p className="text-sm text-muted-foreground">GHS 300/year</p>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xs px-2 py-1 rounded-full bg-primary/20 text-primary font-semibold">
-                                        Save {savingsPercent}%
-                                    </span>
-                                    {selectedPlan === "annual" && <Check className="w-5 h-5 text-primary" />}
-                                </div>
+                        <div className="relative z-[1]">
+                            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/25 to-primary/5 flex items-center justify-center mx-auto mb-4 border border-primary/20">
+                                <Crown className="w-8 h-8 text-primary" />
                             </div>
-                            <p className="text-xs text-muted-foreground mt-2">
-                                That is GHS {annualEquivalent}/year if billed monthly.
+                            <h2 className="text-2xl font-bold mb-2">{t.upgradeToPro}</h2>
+                            <p className="text-muted-foreground mb-6">
+                                {t.upgradeDescription}
                             </p>
-                        </button>
-                        <div className="flex items-baseline justify-center gap-1 pt-1">
-                            <span className="text-3xl font-bold">
-                                {selectedPlan === "annual" ? "GHS 300" : "GHS 30"}
-                            </span>
-                            <span className="text-muted-foreground">
-                                {selectedPlan === "annual" ? "/year" : "/month"}
-                            </span>
-                        </div>
-                        <ul className="space-y-3 text-left">
-                            {[
-                                "Unlimited AI messages",
-                                "Priority response times",
-                                "Advanced summarization",
-                                "Unlimited quiz generation",
-                                "Premium voice options",
-                                "Priority support"
-                            ].map((feature, i) => (
-                                <li key={i} className="flex items-center gap-3 text-sm">
-                                    <Check className="w-4 h-4 text-primary shrink-0" />
-                                    <span>{feature}</span>
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
 
-                    <button
-                        onClick={handleUpgrade}
-                        disabled={isProcessing}
-                        className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                        {isProcessing ? (
-                            <>
-                                <Loader2 className="w-5 h-5 animate-spin" />
-                                <span>Processing...</span>
-                            </>
-                        ) : (
-                            `${t.subscribe} (${selectedPlan === "annual" ? "GHS 300/yr" : "GHS 30/mo"})`
-                        )}
-                    </button>
-                    <button
-                        onClick={onClose}
-                        className="w-full py-3 text-muted-foreground hover:text-foreground transition-colors mt-2"
-                    >
-                        {t.maybeLater}
-                    </button>
+                            <div className="bg-white/[0.03] rounded-2xl p-4 mb-6 space-y-3 border border-white/10">
+                                <button
+                                    type="button"
+                                    onClick={() => setSelectedPlan("monthly")}
+                                    className={cn(
+                                        "w-full text-left rounded-xl border p-4 transition-colors",
+                                        selectedPlan === "monthly"
+                                            ? "border-primary bg-primary/10"
+                                            : "border-white/10 hover:border-white/20"
+                                    )}
+                                >
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <p className="font-semibold">Monthly Pro</p>
+                                            <p className="text-sm text-muted-foreground">GHS 30/month</p>
+                                        </div>
+                                        {selectedPlan === "monthly" && <Check className="w-5 h-5 text-primary" />}
+                                    </div>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setSelectedPlan("annual")}
+                                    className={cn(
+                                        "w-full text-left rounded-xl border p-4 transition-colors",
+                                        selectedPlan === "annual"
+                                            ? "border-primary bg-primary/10"
+                                            : "border-white/10 hover:border-white/20"
+                                    )}
+                                >
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <p className="font-semibold">Annual Pro</p>
+                                            <p className="text-sm text-muted-foreground">GHS 300/year</p>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-xs px-2 py-1 rounded-full bg-primary/20 text-primary font-semibold">
+                                                Save {savingsPercent}%
+                                            </span>
+                                            {selectedPlan === "annual" && <Check className="w-5 h-5 text-primary" />}
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground mt-2">
+                                        That is GHS {annualEquivalent}/year if billed monthly.
+                                    </p>
+                                </button>
+                                <div className="flex items-baseline justify-center gap-1 pt-1">
+                                    <span className="text-3xl font-bold">
+                                        {selectedPlan === "annual" ? "GHS 300" : "GHS 30"}
+                                    </span>
+                                    <span className="text-muted-foreground">
+                                        {selectedPlan === "annual" ? "/year" : "/month"}
+                                    </span>
+                                </div>
+                                <ul className="space-y-3 text-left">
+                                    {[
+                                        "Unlimited AI messages",
+                                        "Priority response times",
+                                        "Advanced summarization",
+                                        "Unlimited quiz generation",
+                                        "Premium voice options",
+                                        "Priority support"
+                                    ].map((feature, i) => (
+                                        <li key={i} className="flex items-center gap-3 text-sm">
+                                            <Check className="w-4 h-4 text-primary shrink-0" />
+                                            <span>{feature}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+
+                            <button
+                                onClick={handleUpgrade}
+                                disabled={isProcessing}
+                                className="w-full py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                            >
+                                {isProcessing ? (
+                                    <>
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                        <span>Processing...</span>
+                                    </>
+                                ) : (
+                                    `${t.subscribe} (${selectedPlan === "annual" ? "GHS 300/yr" : "GHS 30/mo"})`
+                                )}
+                            </button>
+                            <button
+                                onClick={onClose}
+                                className="w-full py-3 text-muted-foreground hover:text-foreground transition-colors mt-2"
+                            >
+                                {t.maybeLater}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
