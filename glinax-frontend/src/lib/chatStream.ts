@@ -174,10 +174,19 @@ export async function streamChat(
   if (donePayload) return donePayload;
 
   if (accumulatedResponse) {
+    const metaChatId =
+      latestMeta && typeof latestMeta["chat_id"] === "number"
+        ? (latestMeta["chat_id"] as number)
+        : null;
+    const metaGuestId =
+      latestMeta && typeof latestMeta["guest_id"] === "string"
+        ? (latestMeta["guest_id"] as string)
+        : undefined;
+
     return {
-      chat_id: typeof latestMeta?.chat_id === "number" ? latestMeta.chat_id : null,
+      chat_id: metaChatId,
       response: accumulatedResponse,
-      guest_id: typeof latestMeta?.guest_id === "string" ? latestMeta.guest_id : undefined,
+      guest_id: metaGuestId,
     };
   }
 
