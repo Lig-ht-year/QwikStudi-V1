@@ -5,14 +5,20 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from .models import TextToSpeech
 logger = logging.getLogger(__name__)
+_OPENAI_CLIENT: OpenAI | None = None
 
 
 def get_openai_client():
     """Lazy initialization of OpenAI client to ensure env vars are loaded."""
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is not None:
+        return _OPENAI_CLIENT
     api_key = os.getenv('OPENAI_API_KEY')
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable is not set")
-    return OpenAI(api_key=api_key)
+    timeout = float(getattr(settings, "OPENAI_REQUEST_TIMEOUT_SECONDS", 30.0))
+    _OPENAI_CLIENT = OpenAI(api_key=api_key, timeout=timeout)
+    return _OPENAI_CLIENT
 
 def generate_chat_title_from_openai(messages: list[str]):
     """
@@ -24,11 +30,12 @@ def generate_chat_title_from_openai(messages: list[str]):
         client = get_openai_client()
         response = client.chat.completions.create(
             model=getattr(settings, "TITLE_OPENAI_MODEL", "gpt-4o-mini"),
-            messages=messages + [
+            messages=[
                 {
                     "role": "system",
-                    "content": "Summarize the conversation into a short title (3-6 words). Return only the title."
-                }
+                    "content": "Create a concise, specific chat title (3-6 words). Return only the title text."
+                },
+                *messages,
             ],
             max_tokens=20,
             temperature=0.4

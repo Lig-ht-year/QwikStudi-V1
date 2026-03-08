@@ -24,6 +24,13 @@ export default function PaymentCallbackClient() {
             return;
         }
 
+        if (callbackStatus === "success" || callbackStatus === "already") {
+            setPlan("pro");
+            setStatus("success");
+            setMessage("Payment successful! You are now a Pro member.");
+            return;
+        }
+
         if (!reference) {
             setStatus("error");
             setMessage("No payment reference found.");
@@ -55,6 +62,12 @@ export default function PaymentCallbackClient() {
             } catch (error) {
                 if (!active) return;
                 console.error("Payment status check failed:", error);
+                const errorMessage = error instanceof Error ? error.message.toLowerCase() : "";
+                if (errorMessage.includes("logged in")) {
+                    setStatus("error");
+                    setMessage("Please sign in again to confirm your payment status.");
+                    return;
+                }
             }
 
             if (attempts < maxAttempts) {

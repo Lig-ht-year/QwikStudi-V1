@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: gweb/gweb
     buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate"
-    startCommand: "gunicorn gweb.wsgi:application --bind 0.0.0.0:$PORT"
+    startCommand: "gunicorn gweb.wsgi:application --config gunicorn.conf.py --bind 0.0.0.0:$PORT"
     healthCheckPath: /healthz/
     envVars:
       - key: DATABASE_URL

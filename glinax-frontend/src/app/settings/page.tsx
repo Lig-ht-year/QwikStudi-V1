@@ -17,6 +17,7 @@ import {
     Monitor,
     Sparkles,
     MessageSquare,
+    Brain,
     Zap,
     Crown,
     ExternalLink,
@@ -31,11 +32,14 @@ import { useTheme } from "next-themes";
 import { cn, formatDisplayName } from "@/lib/utils";
 import Link from "next/link";
 import { useChatStore, ResponseStyle } from "@/stores/chatStore";
-import { useDataStore, Language } from "@/stores/dataStore";
+import { useDataStore, Language, StudyMethod } from "@/stores/dataStore";
 import { useUIStore } from "@/stores/uiStore";
 import { translations } from "@/lib/translations";
 import { useToast } from "@/components/Toast";
 import { BillingPlan, initiatePayment } from "@/lib/payment";
+import { STUDY_METHOD_OPTIONS } from "@/lib/studyMethods";
+
+type TranslationCopy = (typeof translations)[keyof typeof translations];
 
 interface SettingItemProps {
     icon: React.ReactNode;
@@ -221,6 +225,51 @@ function ResponseStyleSelector({ value, onChange }: { value: ResponseStyle; onCh
     );
 }
 
+function StudyMethodSelector({
+    selected,
+    customPrompt,
+    onToggle,
+    onPromptChange,
+}: {
+    selected: StudyMethod[];
+    customPrompt: string;
+    onToggle: (method: StudyMethod) => void;
+    onPromptChange: (value: string) => void;
+}) {
+    return (
+        <div className="px-4 pb-3">
+            <div className="flex flex-wrap gap-2">
+                {STUDY_METHOD_OPTIONS.map((method) => {
+                    const active = selected.includes(method.id);
+                    return (
+                        <button
+                            key={method.id}
+                            type="button"
+                            onClick={() => onToggle(method.id)}
+                            title={method.description}
+                            className={cn(
+                                "px-2.5 py-1.5 rounded-full text-xs border transition-colors",
+                                active
+                                    ? "border-primary/60 bg-primary/15 text-primary"
+                                    : "border-white/10 text-muted-foreground hover:text-foreground hover:border-white/20"
+                            )}
+                        >
+                            {method.shortLabel}
+                        </button>
+                    );
+                })}
+            </div>
+            <textarea
+                value={customPrompt}
+                onChange={(e) => onPromptChange(e.target.value.slice(0, 240))}
+                placeholder="Optional custom study instruction..."
+                rows={2}
+                className="mt-3 w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 resize-none focus:outline-none focus:ring-1 focus:ring-primary/40"
+            />
+        </div>
+    );
+}
+
 function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose: () => void; showToast: (msg: string, type?: "success" | "error" | "warning" | "info") => void }) {
     const language = useDataStore((state) => state.language);
     const t = translations[language];
@@ -379,7 +428,7 @@ function UpgradeModal({ isOpen, onClose, showToast }: { isOpen: boolean; onClose
     );
 }
 
-function DeleteConfirmModal({ isOpen, onClose, onConfirm, t }: { isOpen: boolean; onClose: () => void; onConfirm: () => void; t: any }) {
+function DeleteConfirmModal({ isOpen, onClose, onConfirm, t }: { isOpen: boolean; onClose: () => void; onConfirm: () => void; t: TranslationCopy }) {
     if (!isOpen) return null;
 
     return (
@@ -469,17 +518,16 @@ export default function SettingsPage() {
     const language = useDataStore((state) => state.language);
     const setLanguage = useDataStore((state) => state.setLanguage);
     const t = translations[language];
-
-    if (!hasHydrated) {
-        return <div className="min-h-screen bg-background" />;
-    }
-
     const displayUsername = formatDisplayName(username, t.guest);
     const [notifications, setNotifications] = useState(true);
     const [soundEffects, setSoundEffects] = useState(true);
     const [showLanguageModal, setShowLanguageModal] = useState(false);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
     const { showToast } = useToast();
+
+    if (!hasHydrated) {
+        return <div className="min-h-screen bg-background" />;
+    }
 
     const handleProfilePictureChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -674,6 +722,27 @@ export default function SettingsPage() {
                         <ResponseStyleSelector
                             value={aiSettings.responseStyle}
                             onChange={(val) => setAISettings({ responseStyle: val })}
+                        />
+                        <div className="px-4 pt-1 pb-1">
+                            <div className="flex items-center gap-3 mb-1">
+                                <Brain className="w-5 h-5 text-primary" />
+                                <span className="font-medium">Study Methods</span>
+                            </div>
+                            <p className="text-sm text-muted-foreground mb-2">
+                                Choose how QwikStudi should teach by default.
+                            </p>
+                        </div>
+                        <StudyMethodSelector
+                            selected={aiSettings.studyMethods || []}
+                            customPrompt={aiSettings.studyCustomPrompt || ""}
+                            onToggle={(method) => {
+                                const current = aiSettings.studyMethods || [];
+                                const next = current.includes(method)
+                                    ? current.filter((item) => item !== method)
+                                    : [...current, method];
+                                setAISettings({ studyMethods: next });
+                            }}
+                            onPromptChange={(value) => setAISettings({ studyCustomPrompt: value })}
                         />
                         <div className="divide-y divide-white/[0.02]">
                             <SettingItem

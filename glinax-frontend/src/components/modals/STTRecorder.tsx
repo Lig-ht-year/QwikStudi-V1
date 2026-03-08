@@ -24,7 +24,9 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
     const [recordingTime, setRecordingTime] = useState(0);
     const [audioLevel, setAudioLevel] = useState(0);
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+    const [uploadError, setUploadError] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
+    const uploadInputRef = useRef<HTMLInputElement>(null);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
@@ -34,6 +36,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
     const recordingStartRef = useRef<number | null>(null);
     const recordingDurationRef = useRef<number>(0);
     const waveformBars = 40;
+    const MAX_AUDIO_FILE_SIZE = 25 * 1024 * 1024;
 
     useEffect(() => {
         if (isRecording && !isPaused) {
@@ -100,6 +103,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
 
     const startRecording = async () => {
         if (isProcessing) return;
+        setUploadError("");
         if (!navigator.mediaDevices?.getUserMedia) {
             alert("Audio recording is not supported in this browser.");
             return;
@@ -165,6 +169,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
             setIsPaused(false);
             setRecordingTime(0);
             setUploadedFile(null);
+            if (uploadInputRef.current) uploadInputRef.current.value = "";
         } catch (error) {
             console.error("Failed to start recording:", error);
             cleanupStream();
@@ -193,10 +198,12 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                 return;
             }
 
-            const durationMs = recordingDurationRef.current || recordingTime * 100;
+            const durationMs = recordingDurationRef.current || recordingTime;
             await onProcess(recordedFile, durationMs);
             setIsProcessing(false);
             resetRecorderState();
+            setUploadError("");
+            if (uploadInputRef.current) uploadInputRef.current.value = "";
             onClose();
         } catch (error) {
             console.error("Recording processing failed:", error);
@@ -224,8 +231,46 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
         }
         resetRecorderState();
         setUploadedFile(null);
+        setUploadError("");
+        if (uploadInputRef.current) uploadInputRef.current.value = "";
         setIsProcessing(false);
         onClose();
+    };
+
+    const validateUploadedAudio = (file: File): boolean => {
+        const mime = (file.type || "").toLowerCase();
+        const allowedMimePrefixes = [
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/mp4",
+            "audio/x-m4a",
+            "audio/m4a",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/webm",
+            "video/webm",
+            "audio/ogg",
+            "audio/oga",
+        ];
+        const ext = file.name.toLowerCase().split(".").pop() || "";
+        const allowedExts = new Set(["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "oga"]);
+
+        if (file.size > MAX_AUDIO_FILE_SIZE) {
+            setUploadError(`Audio file is too large. Maximum size is ${MAX_AUDIO_FILE_SIZE / 1024 / 1024}MB.`);
+            return false;
+        }
+        if (!allowedExts.has(ext) && !allowedMimePrefixes.some((prefix) => mime.startsWith(prefix))) {
+            setUploadError("Unsupported audio format. Use mp3, m4a, wav, webm, or ogg.");
+            return false;
+        }
+        setUploadError("");
+        return true;
+    };
+
+    const selectUploadFile = (file: File | null) => {
+        if (!file) return;
+        if (!validateUploadedAudio(file)) return;
+        setUploadedFile(file);
     };
 
     const handleProcessUpload = async () => {
@@ -235,12 +280,20 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
             await onProcess(uploadedFile);
             setIsProcessing(false);
             setUploadedFile(null);
+            setUploadError("");
+            if (uploadInputRef.current) uploadInputRef.current.value = "";
             resetRecorderState();
             onClose();
         } catch (error) {
             console.error("Upload processing failed:", error);
             setIsProcessing(false);
         }
+    };
+
+    const handleUploadDrop = (event: React.DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        if (isProcessing) return;
+        selectUploadFile(event.dataTransfer.files?.[0] ?? null);
     };
 
     return (
@@ -350,18 +403,24 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
 
                     {/* File Upload */}
                     <div
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={handleUploadDrop}
                         className={cn(
                             "border border-dashed border-border rounded-xl p-4 flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-all hover:bg-muted/20 hover:border-primary/30",
                             uploadedFile && "border-primary/50 bg-primary/5"
                         )}
-                        onClick={() => document.getElementById("stt-file-input")?.click()}
+                        onClick={() => uploadInputRef.current?.click()}
                     >
                         <input
+                            ref={uploadInputRef}
                             id="stt-file-input"
                             type="file"
-                            accept="audio/*"
+                            accept=".mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,.ogg,.oga,audio/*"
                             className="hidden"
-                            onChange={(e) => e.target.files?.[0] && setUploadedFile(e.target.files[0])}
+                            onChange={(e) => {
+                                selectUploadFile(e.target.files?.[0] ?? null);
+                                e.currentTarget.value = "";
+                            }}
                         />
                         <FileAudio className={cn("w-5 h-5", uploadedFile ? "text-primary" : "text-muted-foreground")} />
                         {uploadedFile ? (
@@ -387,6 +446,7 @@ export function STTRecorder({ isOpen, onClose, onProcess }: STTRecorderProps) {
                             Generate Notes
                         </button>
                     )}
+                    {uploadError && <p className="text-xs text-red-400">{uploadError}</p>}
                     <AsyncFeatureStatus feature="stt" isActive={isProcessing} />
                 </div>
             </div>

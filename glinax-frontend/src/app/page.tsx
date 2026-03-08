@@ -48,10 +48,32 @@ export default function Home() {
     const { showToast } = useToast();
 
     const parseFeatureError = (error: unknown, fallback: string) => {
-        const axiosError = error as { response?: { status?: number; data?: { error?: string } } };
+        const axiosError = error as {
+            response?: {
+                status?: number;
+                data?: { error?: string; detail?: string; message?: string };
+            };
+            message?: string;
+        };
         const status = axiosError?.response?.status;
-        const backendMessage = axiosError?.response?.data?.error;
-        const message = backendMessage || fallback;
+        const data = axiosError?.response?.data;
+        const backendMessage = data?.error || data?.detail || data?.message;
+
+        if (status === 429) {
+            const throttledText = typeof backendMessage === "string" ? backendMessage : "";
+            if (throttledText.toLowerCase().includes("throttled")) {
+                return {
+                    status,
+                    message: "Too many requests right now. Please wait a moment and try again.",
+                };
+            }
+            return {
+                status,
+                message: throttledText || "Rate limit reached. Please wait a bit and try again.",
+            };
+        }
+
+        const message = backendMessage || axiosError?.message || fallback;
         return { status, message };
     };
 

@@ -85,9 +85,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const [searchQuery, setSearchQuery] = useState("");
 
     // Filter sessions based on search query
-    const visibleSessions = isLoggedIn
-        ? sessions.filter((session) => session.chatId !== null)
-        : sessions;
+    const visibleSessions = sessions;
 
     const filteredSessions = visibleSessions.filter((session) =>
         session.title.toLowerCase().includes(searchQuery.toLowerCase())

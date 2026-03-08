@@ -2,6 +2,7 @@ import io
 import wave
 import audioop
 import math
+import base64
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -35,24 +36,56 @@ import tempfile
 from django.http import HttpResponse, FileResponse, JsonResponse
 import os
 import subprocess
+import time
 from uuid import uuid4
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.db.models import F
+from django.db.models.functions import Greatest
 from chat.models import Chat, ChatHistory, ChatCollaborator
 import re
 from payments.models import UserProfile as PaymentsUserProfile
 
 logger = logging.getLogger(__name__)
+_OPENAI_CLIENT: OpenAI | None = None
+FREE_AUDIO_MINUTES_LIMIT = 10.0
+MAX_STT_UPLOAD_BYTES = int(getattr(settings, "STT_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+MAX_STT_DURATION_MS = int(getattr(settings, "STT_MAX_DURATION_MS", 15 * 60 * 1000))
+STT_FFMPEG_TIMEOUT_SECONDS = int(getattr(settings, "STT_FFMPEG_TIMEOUT_SECONDS", 30))
+STT_ENABLE_PREPROCESS = bool(getattr(settings, "STT_ENABLE_PREPROCESS", False))
+STT_SKIP_WAV_QUALITY_CHECK = bool(getattr(settings, "STT_SKIP_WAV_QUALITY_CHECK", True))
+STT_PERSIST_TRANSCRIPTIONS = bool(getattr(settings, "STT_PERSIST_TRANSCRIPTIONS", False))
+TTS_PERSIST_AUDIO_FILES = bool(getattr(settings, "TTS_PERSIST_AUDIO_FILES", False))
+TTS_RETURN_INLINE_AUDIO = bool(getattr(settings, "TTS_RETURN_INLINE_AUDIO", True))
+ALLOWED_STT_EXTENSIONS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".oga"}
+ALLOWED_STT_MIME_PREFIXES = (
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/m4a",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/webm",
+    "video/webm",
+    "audio/ogg",
+    "audio/oga",
+)
 
 
 def get_openai_client():
     """Lazy initialization of OpenAI client to ensure env vars are loaded."""
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is not None:
+        return _OPENAI_CLIENT
     api_key = getattr(settings, "OPENAI_API_KEY", None) or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable is not set")
-    return OpenAI(api_key=api_key)
+    timeout = float(getattr(settings, "OPENAI_REQUEST_TIMEOUT_SECONDS", 30.0))
+    _OPENAI_CLIENT = OpenAI(api_key=api_key, timeout=timeout)
+    return _OPENAI_CLIENT
 
 def _get_chat_for_write(user, chat_id):
     if not chat_id:
@@ -99,6 +132,25 @@ def _estimate_tts_minutes(text: str, speed: float | None = None) -> float:
         except (TypeError, ValueError):
             pass
     return max(minutes, 0.01)
+
+
+def _reserve_tts_minutes(profile: PaymentsUserProfile, estimated_minutes: float) -> bool:
+    if _is_premium(profile):
+        return True
+    allowed_before = FREE_AUDIO_MINUTES_LIMIT - float(estimated_minutes)
+    if allowed_before < 0:
+        return False
+    updated = PaymentsUserProfile.objects.filter(
+        pk=profile.pk,
+        audio_minutes_used__lte=allowed_before
+    ).update(audio_minutes_used=F("audio_minutes_used") + float(estimated_minutes))
+    return updated == 1
+
+
+def _refund_tts_minutes(profile: PaymentsUserProfile, estimated_minutes: float) -> None:
+    PaymentsUserProfile.objects.filter(pk=profile.pk).update(
+        audio_minutes_used=Greatest(F("audio_minutes_used") - float(estimated_minutes), 0.0)
+    )
 
 
 def _is_default_chat_title(title: str) -> bool:
@@ -267,28 +319,49 @@ class GenerateAudioAPIView(APIView):
 
             if not text_input or not text_input.strip():
                 return Response({"error": "No valid text, file, or file_id provided."}, status=400)
+            text_input = text_input.strip()
+            max_tts_length = int(
+                getattr(
+                    settings,
+                    "TTS_MAX_TEXT_LENGTH_PRO" if premium_active else "TTS_MAX_TEXT_LENGTH_FREE",
+                    5000 if premium_active else 2000,
+                )
+            )
+            max_tts_length = max(100, max_tts_length)
+            if len(text_input) > max_tts_length:
+                return Response(
+                    {"error": f"Text too long. Maximum {max_tts_length} characters allowed for text-to-speech."},
+                    status=400,
+                )
 
             estimated_minutes = _estimate_tts_minutes(text_input, request.data.get("speed"))
-            if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+            quota_reserved = _reserve_tts_minutes(profile, estimated_minutes)
+            if not quota_reserved:
                 return Response(
                     {"error": "Free audio limit reached. Upgrade to premium."},
                     status=429
                 )
 
-            response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice=request.data.get("voice", "verse"),
-                input=text_input,
-                speed=request.data.get("speed") if "speed" in request.data else 1.0
-            )
+            try:
+                response = client.audio.speech.create(
+                    model=getattr(settings, "TTS_OPENAI_MODEL", "gpt-4o-mini-tts"),
+                    voice=request.data.get("voice", "verse"),
+                    input=text_input,
+                    speed=request.data.get("speed") if "speed" in request.data else 1.0
+                )
+            except Exception:
+                if quota_reserved and not premium_active:
+                    _refund_tts_minutes(profile, estimated_minutes)
+                raise
 
             audio_bytes = response.read() if hasattr(response, "read") else response.content
-            audio_path = default_storage.save(f"tts_output_{uuid4().hex}.mp3", ContentFile(audio_bytes))
-            audio_url = default_storage.url(audio_path)
-
-            if not premium_active:
-                profile.audio_minutes_used += estimated_minutes
-                profile.save(update_fields=["audio_minutes_used"])
+            if TTS_PERSIST_AUDIO_FILES:
+                audio_path = default_storage.save(f"tts_output_{uuid4().hex}.mp3", ContentFile(audio_bytes))
+                audio_url = default_storage.url(audio_path)
+            elif TTS_RETURN_INLINE_AUDIO:
+                audio_url = f"data:audio/mpeg;base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+            else:
+                audio_url = None
 
             return Response({"audio_url": audio_url}, status=status.HTTP_200_OK)
 
@@ -316,27 +389,42 @@ class QuickGenerateAudioAPIView(APIView):
 
             profile = _get_payments_profile(request.user)
             premium_active = _is_premium(profile)
+            max_tts_length = int(
+                getattr(
+                    settings,
+                    "TTS_MAX_TEXT_LENGTH_PRO" if premium_active else "TTS_MAX_TEXT_LENGTH_FREE",
+                    5000 if premium_active else 2000,
+                )
+            )
+            max_tts_length = max(100, max_tts_length)
+            if len(text) > max_tts_length:
+                return JsonResponse(
+                    {"error": f"Text too long. Maximum {max_tts_length} characters allowed for text-to-speech."},
+                    status=400,
+                )
             estimated_minutes = _estimate_tts_minutes(text)
-            if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+            quota_reserved = _reserve_tts_minutes(profile, estimated_minutes)
+            if not quota_reserved:
                 return JsonResponse(
                     {"error": "Free audio limit reached. Upgrade to premium."},
                     status=429
                 )
 
             client = get_openai_client()
-            response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice="alloy",
-                input=text
-            )
+            try:
+                response = client.audio.speech.create(
+                    model=getattr(settings, "TTS_OPENAI_MODEL", "gpt-4o-mini-tts"),
+                    voice="alloy",
+                    input=text
+                )
+            except Exception:
+                if quota_reserved and not premium_active:
+                    _refund_tts_minutes(profile, estimated_minutes)
+                raise
             if hasattr(response, "iter_bytes"):
                 audio_bytes = b"".join(response.iter_bytes())
             else:
                 audio_bytes = response.read()
-
-            if not premium_active:
-                profile.audio_minutes_used += estimated_minutes
-                profile.save(update_fields=["audio_minutes_used"])
 
             return HttpResponse(
                 audio_bytes,
@@ -414,12 +502,6 @@ class GenerateQuestionsAPIView(APIView):
                     return Response({"error": "This question type requires a premium subscription."}, status=403)
                 if mode == "both":
                     mode = "mcq"
-                remaining = 20 - profile.questions_generated
-                if remaining <= 0 or num_questions > remaining:
-                    return Response(
-                        {"error": "You have reached your free question limit. Upgrade to premium to continue."},
-                        status=429
-                    )
 
             try:
                 if source_type == 'file':
@@ -505,7 +587,7 @@ class GenerateQuestionsAPIView(APIView):
             if warning_msg:
                 response_data["warning"] = warning_msg
 
-            if not premium_active:
+            if not premium_active and mode != "mcq":
                 profile.questions_generated += len(saved_questions)
                 profile.save(update_fields=["questions_generated"])
 
@@ -622,6 +704,35 @@ class TranscribeAPIView(APIView):
             file = request.FILES.get('file')
             chat_id = request.data.get("chat_id")
             duration_ms = request.data.get("duration_ms")
+            original_name = (getattr(file, "name", "") or "").strip()
+            ext = os.path.splitext(original_name.lower())[1]
+            content_type = (getattr(file, "content_type", "") or "").lower()
+
+            declared_size = getattr(file, "size", None)
+            if isinstance(declared_size, int) and declared_size > MAX_STT_UPLOAD_BYTES:
+                return Response(
+                    {"error": f"Audio file is too large. Maximum allowed size is {MAX_STT_UPLOAD_BYTES // (1024 * 1024)}MB."},
+                    status=413,
+                )
+
+            has_allowed_ext = ext in ALLOWED_STT_EXTENSIONS
+            has_allowed_mime = any(content_type.startswith(prefix) for prefix in ALLOWED_STT_MIME_PREFIXES)
+            if not has_allowed_ext and not has_allowed_mime:
+                return Response(
+                    {"error": "Unsupported audio format. Supported formats: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg."},
+                    status=400,
+                )
+
+            if duration_ms is not None:
+                try:
+                    if float(duration_ms) > MAX_STT_DURATION_MS:
+                        max_minutes = int(MAX_STT_DURATION_MS // 60000)
+                        return Response(
+                            {"error": f"Recording is too long. Maximum duration is {max_minutes} minutes."},
+                            status=400,
+                        )
+                except (TypeError, ValueError):
+                    return Response({"error": "Invalid duration metadata provided."}, status=400)
             try:
                 client = get_openai_client()
                 # The OpenAI SDK accepts bytes, IOBase, PathLike, or a tuple (filename, contents, media type).
@@ -633,8 +744,13 @@ class TranscribeAPIView(APIView):
                 file_bytes = file.read()
                 if not file_bytes:
                     return Response({"error": "Uploaded audio is empty. Please record again."}, status=400)
-                content_type = file.content_type or "application/octet-stream"
+                content_type = file.content_type or content_type or "application/octet-stream"
                 filename = file.name
+                if len(file_bytes) > MAX_STT_UPLOAD_BYTES:
+                    return Response(
+                        {"error": f"Audio file is too large. Maximum allowed size is {MAX_STT_UPLOAD_BYTES // (1024 * 1024)}MB."},
+                        status=413,
+                    )
 
                 logger.info(
                     "STT upload: name=%s type=%s size=%s",
@@ -643,40 +759,44 @@ class TranscribeAPIView(APIView):
                     len(file_bytes),
                 )
 
-                # If webm/ogg, try converting to mono 16k wav for more reliable transcription
                 is_webm = content_type.startswith("audio/webm") or content_type.startswith("video/webm") or filename.lower().endswith(".webm")
                 is_ogg = content_type.startswith("audio/ogg") or content_type.startswith("audio/oga") or filename.lower().endswith((".ogg", ".oga"))
-                if is_webm or is_ogg:
+                can_retry_with_preprocess = is_webm or is_ogg
+
+                def preprocess_to_wav(raw_bytes: bytes, raw_name: str, raw_type: str) -> tuple[bytes, str, str] | None:
                     try:
                         with tempfile.TemporaryDirectory() as tmpdir:
                             src_path = os.path.join(tmpdir, "input")
                             dst_path = os.path.join(tmpdir, "output.wav")
                             with open(src_path, "wb") as f:
-                                f.write(file_bytes)
+                                f.write(raw_bytes)
 
-                            logger.info("STT converting to wav via ffmpeg (type=%s name=%s)", content_type, filename)
+                            logger.info("STT converting to wav via ffmpeg (type=%s name=%s)", raw_type, raw_name)
                             result = subprocess.run(
                                 ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", dst_path],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
+                                timeout=STT_FFMPEG_TIMEOUT_SECONDS,
                                 check=False,
                             )
 
-                            if result.returncode == 0 and os.path.exists(dst_path):
-                                with open(dst_path, "rb") as f:
-                                    file_bytes = f.read()
-                                content_type = "audio/wav"
-                                filename = os.path.splitext(filename)[0] + ".wav"
-                                logger.info("STT converted to wav: size=%s", len(file_bytes))
-                            else:
+                            if result.returncode != 0 or not os.path.exists(dst_path):
                                 logger.warning("STT ffmpeg convert failed: %s", result.stderr[:200])
+                                return None
+                            with open(dst_path, "rb") as f:
+                                wav_bytes = f.read()
+                            wav_name = os.path.splitext(raw_name)[0] + ".wav"
+                            logger.info("STT converted to wav: size=%s", len(wav_bytes))
+                            return wav_bytes, wav_name, "audio/wav"
+                    except subprocess.TimeoutExpired:
+                        raise
                     except Exception as convert_e:
                         logger.warning("STT convert exception: %s", convert_e)
+                        return None
 
-                # If we have wav bytes, check for very low volume / silence
-                if content_type == "audio/wav":
+                def reject_low_quality_wav(raw_bytes: bytes):
                     try:
-                        with wave.open(io.BytesIO(file_bytes), "rb") as wf:
+                        with wave.open(io.BytesIO(raw_bytes), "rb") as wf:
                             frames = wf.readframes(wf.getnframes())
                             rms = audioop.rms(frames, wf.getsampwidth())
                             if rms == 0:
@@ -692,31 +812,75 @@ class TranscribeAPIView(APIView):
                             )
                     except Exception as audio_check_e:
                         logger.warning("STT wav check failed: %s", audio_check_e)
+                    return None
 
+                if STT_ENABLE_PREPROCESS and can_retry_with_preprocess:
+                    try:
+                        preprocessed = preprocess_to_wav(file_bytes, filename, content_type)
+                    except subprocess.TimeoutExpired:
+                        return Response(
+                            {"error": "Audio preprocessing timed out. Please upload a shorter recording."},
+                            status=400,
+                        )
+                    if preprocessed:
+                        file_bytes, filename, content_type = preprocessed
+
+                if content_type == "audio/wav" and not STT_SKIP_WAV_QUALITY_CHECK:
+                    wav_rejection = reject_low_quality_wav(file_bytes)
+                    if wav_rejection:
+                        return wav_rejection
+
+                stt_started = time.monotonic()
                 file_tuple = (filename, file_bytes, content_type)
-
-                response = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=file_tuple,
-                    response_format="text"
-                )
-                transcription_text = response
                 try:
-                    file.seek(0)
-                except Exception:
-                    pass
-                audio_obj = Audio.objects.create(
-                    user=request.user,
-                    audio=file,
-                    source_type="transcription",
-                    language=None,
-                )
-                transcription_obj = Transcription.objects.create(
-                    user=request.user,
-                    audio=audio_obj,
-                    transcription=transcription_text,
-                    language=None,
-                )
+                    transcription_text = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=file_tuple,
+                        response_format="text"
+                    )
+                except Exception as direct_transcribe_error:
+                    if not can_retry_with_preprocess or content_type == "audio/wav":
+                        raise
+                    logger.warning("STT direct transcription failed, retrying with preprocessing: %s", direct_transcribe_error)
+                    try:
+                        preprocessed = preprocess_to_wav(file_bytes, filename, content_type)
+                    except subprocess.TimeoutExpired:
+                        return Response(
+                            {"error": "Audio preprocessing timed out. Please upload a shorter recording."},
+                            status=400,
+                        )
+                    if not preprocessed:
+                        raise
+                    file_bytes, filename, content_type = preprocessed
+                    if not STT_SKIP_WAV_QUALITY_CHECK:
+                        wav_rejection = reject_low_quality_wav(file_bytes)
+                        if wav_rejection:
+                            return wav_rejection
+                    transcription_text = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=(filename, file_bytes, content_type),
+                        response_format="text"
+                    )
+                logger.info("STT transcription completed in %.2fs", time.monotonic() - stt_started)
+                transcription_id = None
+                if STT_PERSIST_TRANSCRIPTIONS:
+                    try:
+                        file.seek(0)
+                    except Exception:
+                        pass
+                    audio_obj = Audio.objects.create(
+                        user=request.user,
+                        audio=file,
+                        source_type="transcription",
+                        language=None,
+                    )
+                    transcription_obj = Transcription.objects.create(
+                        user=request.user,
+                        audio=audio_obj,
+                        transcription=transcription_text,
+                        language=None,
+                    )
+                    transcription_id = transcription_obj.id
                 chat = _get_chat_for_write(request.user, chat_id)
                 chat_title = None
                 if chat:
@@ -749,7 +913,7 @@ class TranscribeAPIView(APIView):
                 return Response({
                     "success": True,
                     "transcription": transcription_text,
-                    "transcription_id": transcription_obj.id,
+                    "transcription_id": transcription_id,
                     "chat_title": chat_title,
                 }, status=status.HTTP_200_OK)
             except Exception as transcribe_e:

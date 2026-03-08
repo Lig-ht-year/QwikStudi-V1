@@ -34,9 +34,11 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     const [audioSrc, setAudioSrc] = useState<string | undefined>(audioUrl);
     const [candidateIndex, setCandidateIndex] = useState(0);
     const [isDownloading, setIsDownloading] = useState(false);
+    const [triedApiFallback, setTriedApiFallback] = useState(false);
     const isScrubbingRef = React.useRef(false);
     const audioRef = React.useRef<HTMLAudioElement | null>(null);
     const progressRef = React.useRef<HTMLDivElement | null>(null);
+    const objectUrlRef = React.useRef<string | null>(null);
     const plan = useDataStore((state) => state.plan);
     const canDownload = plan === "pro";
     const { showToast } = useToast();
@@ -74,11 +76,44 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     React.useEffect(() => {
         setCandidateIndex(0);
         setAudioSrc(candidates[0]);
+        setTriedApiFallback(false);
         setIsPlaying(false);
         setProgress(0);
         setCurrentTime(0);
         setDurationSeconds(0);
     }, [candidates]);
+
+    React.useEffect(() => {
+        return () => {
+            if (objectUrlRef.current) {
+                URL.revokeObjectURL(objectUrlRef.current);
+                objectUrlRef.current = null;
+            }
+        };
+    }, []);
+
+    const loadAudioViaApi = React.useCallback(async () => {
+        if (!ttsId || triedApiFallback) return;
+        setTriedApiFallback(true);
+        try {
+            const res = await api.get(`/chat/audio/${ttsId}/`, { responseType: "blob" });
+            const blob = new Blob([res.data], { type: "audio/mpeg" });
+            if (objectUrlRef.current) {
+                URL.revokeObjectURL(objectUrlRef.current);
+            }
+            const objectUrl = URL.createObjectURL(blob);
+            objectUrlRef.current = objectUrl;
+            setAudioSrc(objectUrl);
+        } catch {
+            // keep current failed state
+        }
+    }, [ttsId, triedApiFallback]);
+
+    React.useEffect(() => {
+        if (!audioSrc && ttsId) {
+            void loadAudioViaApi();
+        }
+    }, [audioSrc, ttsId, loadAudioViaApi]);
 
     const parseDurationToSeconds = React.useCallback((raw?: string) => {
         if (!raw) return 0;
@@ -151,13 +186,16 @@ export function AudioPlayerCard({ title, audioUrl, duration = "2:45", transcript
     };
 
     const handleAudioError = () => {
-        if (candidateIndex >= candidates.length - 1) {
-            setIsPlaying(false);
+        if (candidateIndex < candidates.length - 1) {
+            const nextIndex = candidateIndex + 1;
+            setCandidateIndex(nextIndex);
+            setAudioSrc(candidates[nextIndex]);
             return;
         }
-        const nextIndex = candidateIndex + 1;
-        setCandidateIndex(nextIndex);
-        setAudioSrc(candidates[nextIndex]);
+        setIsPlaying(false);
+        if (ttsId) {
+            void loadAudioViaApi();
+        }
     };
 
     const handleSeek = React.useCallback((clientX: number) => {

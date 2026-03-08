@@ -7,12 +7,14 @@ from .views import (
     ListCollaboratorsAPIView, ApproveCollaborationAPIView,
     PendingCollaborationsAPIView, ListUsersAPIView, RejectCollaborationAPIView,
     TextToAudioView, AudioFileByIdView, AudioFileDownloadView, QuizGenerateAPIView, QuizGradeTextAPIView, SummarizeAPIView,
+    ChatStreamAPIView,
     GuestChatStatusAPIView
 
 )
 
 urlpatterns = [
     path('', ChatAPIView.as_view(), name='chat'),
+    path('stream/', ChatStreamAPIView.as_view(), name='chat-stream'),
     path('guest/status/', GuestChatStatusAPIView.as_view(), name='chat-guest-status'),
     path('commit/', CommitChatView.as_view(), name='chat-commit'),
     path('list/', ChatListAPIView.as_view(), name='chat-list'),

@@ -13,13 +13,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE_PATH = BASE_DIR / '.env'
 
-print(f"[DEBUG] Loading env from: {ENV_FILE_PATH}")
 # Load only gweb/gweb/.env
 load_dotenv(ENV_FILE_PATH)
-
-# Debug: print database config
-print(f"[DEBUG] DATABASE_URL in env: {os.getenv('DATABASE_URL')}")
-print(f"[DEBUG] DB_NAME in env: {os.getenv('DB_NAME')}")
 
 SECRET_KEY = os.getenv('SECRET_KEY' , "bGoXs4fFx7P9XwpW30g8Enm-bfEx9-1jly5-hZxnh6vECcbQVUEXYRqP54ptZmALWFg")
 if not SECRET_KEY:
@@ -40,8 +35,50 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-QUIZ_SOURCE_MAX_CHARS = _env_int("QUIZ_SOURCE_MAX_CHARS", 7000)
-SUMMARY_SOURCE_MAX_CHARS = _env_int("SUMMARY_SOURCE_MAX_CHARS", 9000)
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+QUIZ_SOURCE_MAX_CHARS = _env_int("QUIZ_SOURCE_MAX_CHARS", 20000)
+SUMMARY_SOURCE_MAX_CHARS = _env_int("SUMMARY_SOURCE_MAX_CHARS", 8500)
+QUIZ_SOURCE_MAX_PAGES = _env_int("QUIZ_SOURCE_MAX_PAGES", 60)
+QUIZ_SOURCE_MAX_FILE_BYTES = _env_int("QUIZ_SOURCE_MAX_FILE_BYTES", 50 * 1024 * 1024)
+SUMMARY_SOURCE_MAX_FILE_BYTES = _env_int("SUMMARY_SOURCE_MAX_FILE_BYTES", 50 * 1024 * 1024)
+QUIZ_CACHE_TTL_SECONDS = _env_int("QUIZ_CACHE_TTL_SECONDS", 900)
+SUMMARY_CACHE_TTL_SECONDS = _env_int("SUMMARY_CACHE_TTL_SECONDS", 900)
+DATA_UPLOAD_MAX_MEMORY_SIZE = _env_int("DATA_UPLOAD_MAX_MEMORY_SIZE", 64 * 1024 * 1024)
+FILE_UPLOAD_MAX_MEMORY_SIZE = _env_int("FILE_UPLOAD_MAX_MEMORY_SIZE", 10 * 1024 * 1024)
+TTS_SOURCE_MAX_FILE_BYTES = _env_int("TTS_SOURCE_MAX_FILE_BYTES", 10 * 1024 * 1024)
+TTS_MAX_TEXT_LENGTH_FREE = _env_int("TTS_MAX_TEXT_LENGTH_FREE", 2000)
+TTS_MAX_TEXT_LENGTH_PRO = _env_int("TTS_MAX_TEXT_LENGTH_PRO", 5000)
+OPENAI_REQUEST_TIMEOUT_SECONDS = _env_float("OPENAI_REQUEST_TIMEOUT_SECONDS", 30.0)
+STT_MAX_UPLOAD_BYTES = _env_int("STT_MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
+STT_MAX_DURATION_MS = _env_int("STT_MAX_DURATION_MS", 15 * 60 * 1000)
+STT_FFMPEG_TIMEOUT_SECONDS = _env_int("STT_FFMPEG_TIMEOUT_SECONDS", 20)
+STT_ENABLE_PREPROCESS = _env_bool("STT_ENABLE_PREPROCESS", False)
+STT_SKIP_WAV_QUALITY_CHECK = _env_bool("STT_SKIP_WAV_QUALITY_CHECK", False)
+STT_PERSIST_TRANSCRIPTIONS = _env_bool("STT_PERSIST_TRANSCRIPTIONS", True)
+TTS_PERSIST_AUDIO_FILES = _env_bool("TTS_PERSIST_AUDIO_FILES", True)
+TTS_PERSIST_CHAT_HISTORY = _env_bool("TTS_PERSIST_CHAT_HISTORY", True)
+TTS_RETURN_INLINE_AUDIO = _env_bool("TTS_RETURN_INLINE_AUDIO", False)
 CHAT_OPENAI_MODEL = os.getenv("CHAT_OPENAI_MODEL", "gpt-4o-mini")
 TITLE_OPENAI_MODEL = os.getenv("TITLE_OPENAI_MODEL", "gpt-4o-mini")
 QUIZ_OPENAI_MODEL = os.getenv("QUIZ_OPENAI_MODEL", "gpt-4o-mini")

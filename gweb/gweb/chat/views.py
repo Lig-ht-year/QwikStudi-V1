@@ -1,4 +1,7 @@
+import json
 import logging
+import base64
+import hashlib
 from uuid import UUID, uuid4
 
 from django.conf import settings
@@ -7,6 +10,8 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
+from django.db.models import F
+from django.db.models.functions import Greatest
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -17,6 +22,7 @@ from django.http import FileResponse
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from openai import OpenAI
+from django.http import StreamingHttpResponse
 
 from .models import Chat, ChatHistory, ChatCollaborator
 from .serializers import (
@@ -27,6 +33,7 @@ from .serializers import (
     ChatCollaboratorSerializer,
 )
 from django.core.files.base import ContentFile
+from django.core.cache import cache
 from.models import TextToSpeech
 from .utils import get_client_ip, generate_chat_title_from_openai, get_openai_client
 
@@ -36,41 +43,24 @@ from files.models import File as StoredFile
 import re
 
 logger = logging.getLogger(__name__)
+FREE_AUDIO_MINUTES_LIMIT = 10.0
+TTS_PERSIST_AUDIO_FILES = bool(getattr(settings, "TTS_PERSIST_AUDIO_FILES", False))
+TTS_PERSIST_CHAT_HISTORY = bool(getattr(settings, "TTS_PERSIST_CHAT_HISTORY", False))
+TTS_RETURN_INLINE_AUDIO = bool(getattr(settings, "TTS_RETURN_INLINE_AUDIO", True))
+
+STUDY_METHOD_PROMPTS = {
+    "feynman": "Explain ideas in simple language first, then expose misunderstandings or gaps and rebuild the concept clearly.",
+    "active_recall": "Turn parts of the lesson into short memory-check questions before revealing the answer.",
+    "spaced_repetition": "Suggest what to review later and highlight the facts worth revisiting over time.",
+    "socratic": "Use guided questions that help the learner reason toward the answer instead of only stating conclusions.",
+    "interleaving": "Contrast related ideas, compare cases, and mix connected concepts when it improves understanding.",
+    "exam_drill": "Frame the explanation in an exam-focused way with likely question angles, marking cues, or quick practice checks.",
+}
 
 def _sanitize_response_text(text: str) -> str:
     if not isinstance(text, str):
         return text
-    # Remove markdown symbols the user doesn't want shown.
-    cleaned = text.replace("#", "").replace("*", "")
-
-    # Convert common LaTeX fragments into student-friendly plain text.
-    replacements = {
-        "\\[": "",
-        "\\]": "",
-        "\\(": "",
-        "\\)": "",
-        "\\cdot": " * ",
-        "\\times": " x ",
-        "\\div": " / ",
-        "\\pm": "+/-",
-        "\\rightarrow": " -> ",
-        "\\Rightarrow": " => ",
-        "\\leq": " <= ",
-        "\\geq": " >= ",
-        "\\neq": " != ",
-        "\\approx": " ~ ",
-        "\\sqrt": "sqrt",
-        "\\frac": "frac",
-    }
-    for src, dst in replacements.items():
-        cleaned = cleaned.replace(src, dst)
-
-    # Remove \text{...} wrappers but keep content.
-    cleaned = re.sub(r"\\text\{([^}]*)\}", r"\1", cleaned)
-    # Convert simple LaTeX subscripts/superscripts into readable notation.
-    cleaned = re.sub(r"_\{([^}]*)\}", r"_(\1)", cleaned)
-    cleaned = re.sub(r"\^\{([^}]*)\}", r"^(\1)", cleaned)
-    cleaned = cleaned.replace("{", "").replace("}", "")
+    cleaned = text
 
     # Preserve readable structure: keep line breaks, normalize spacing per line.
     lines = []
@@ -80,6 +70,153 @@ def _sanitize_response_text(text: str) -> str:
     cleaned = "\n".join(lines)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
+
+
+def _sse_payload(payload):
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _parse_study_methods(value):
+    if value is None or value == "":
+        return []
+
+    raw_items = value
+    if isinstance(value, str):
+        parsed = None
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = [item.strip() for item in value.split(",")]
+        raw_items = parsed
+
+    if not isinstance(raw_items, list):
+        raw_items = [raw_items]
+
+    cleaned = []
+    seen = set()
+    for item in raw_items:
+        normalized = str(item or "").strip().lower()
+        if not normalized or normalized not in STUDY_METHOD_PROMPTS or normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return cleaned
+
+
+def _normalize_study_custom_prompt(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    return text[:240]
+
+
+def _build_chat_system_prompt(study_methods=None, study_custom_prompt=""):
+    study_methods = study_methods or []
+    study_guidance_lines = []
+    for method in study_methods:
+        guidance = STUDY_METHOD_PROMPTS.get(method)
+        if guidance:
+            study_guidance_lines.append(f"- {guidance}")
+
+    dynamic_section = ""
+    if study_guidance_lines or study_custom_prompt:
+        parts = ["\n## Active Study Mode"]
+        parts.append("- Apply the following response preferences unless the user asks for a different format.")
+        parts.extend(study_guidance_lines)
+        if study_custom_prompt:
+            parts.append(f"- Additional user instruction: {study_custom_prompt}")
+        dynamic_section = "\n".join(parts) + "\n"
+
+    return rf"""You are QwikStudi, an AI study buddy created by Glinax Tech Innovations.
+
+## Your Core Identity
+- You are a helpful, patient, and encouraging study companion.
+- You help users learn and understand concepts deeply, not just memorize answers.
+- When asked for your creator, always answer "Glinax Tech Innovations".
+- When asked for your name, always answer "QwikStudi".
+- Never say you have no name. Never claim to be created by OpenAI or any other organization.
+- Stay in character as a friendly tutor at all times.
+
+## Teaching Approach
+- Prioritize understanding: explain the "why" behind each step.
+- Use active learning: guide users to discover solutions, not only receive results.
+- Use concrete examples before abstractions when possible.
+- Offer an alternate explanation when the first one may be too advanced.
+
+## Computational Reasoning Standards (Math, Engineering, CS, Data)
+- Start by identifying: what is given, what is unknown, and what method will be used.
+- If data is missing or ambiguous, ask one concise clarifying question; if proceeding, state assumptions clearly.
+- Show formulas or governing principles first, then substitute values, then compute.
+- Keep units attached through calculations and convert units explicitly when needed.
+- Prefer exact values when useful, then provide practical rounded results with sensible precision.
+- Perform a quick validation check (units, sign, scale, bounds, or reasonableness).
+- For code/algorithm tasks, include: approach, complexity (if relevant), and a correct minimal example.
+- For multi-step problems, label steps in a clear sequence and end with a direct final answer.
+
+## Presentation Format For Quantitative Problems
+- Problem setup
+- Given / Find
+- Assumptions
+- Step-by-step solution
+- Final answer (with units)
+- Quick check
+
+## Response Style
+- Be clear, concise, and student-friendly.
+- Break complex work into digestible steps.
+- Keep responses scannable with short paragraphs or bullets.
+- Match detail level to request complexity and selected response style.
+- Use clean Markdown structure (headings, bullets, numbered steps, code fences, and tables when helpful).
+
+## Context Awareness
+- Use the current chat context and relevant prior messages.
+- Connect new concepts to what the learner already discussed.
+{dynamic_section}
+## Response Quality Rules
+- If uncertain, explicitly state uncertainty instead of guessing.
+- Do not invent constants, formulas, citations, experimental values, or standards.
+- Prefer readable plain notation for simple expressions (x^2, x_i, x^(n+1), F = m * a).
+- For advanced math, you may use Markdown math delimiters: inline $...$ and block $$...$$.
+- Do not output raw LaTeX fragments outside math delimiters.
+- If you use LaTeX syntax (e.g., \frac, \Phi, \theta, \sum, \int), always place it inside $...$ or $$...$$.
+- When solving computational problems, format calculations so each step is visually separable and easy to verify.
+
+Remember: Your goal is to help users become better learners and better problem-solvers."""
+
+
+def _generate_chat_completion_text(client, model: str, messages: list[dict], temperature: float, max_tokens: int) -> str:
+    assembled_parts: list[str] = []
+    working_messages = list(messages)
+
+    # One continuation pass if the model hits token limit.
+    for _ in range(2):
+        response = client.chat.completions.create(
+            model=model,
+            messages=working_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        choice = response.choices[0]
+        content = (choice.message.content or "").strip()
+        if content:
+            assembled_parts.append(content)
+
+        if choice.finish_reason != "length":
+            break
+
+        working_messages.extend(
+            [
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": "Continue exactly where you stopped. Do not repeat prior text. Finish the answer.",
+                },
+            ]
+        )
+
+    return "\n".join(part for part in assembled_parts if part).strip()
+
 
 def _get_chat_for_write(user, chat_id):
     if not chat_id:
@@ -112,6 +249,25 @@ def _estimate_tts_minutes(text: str) -> float:
     wpm = 150.0
     minutes = words / wpm if wpm else 0.0
     return max(minutes, 0.01)
+
+
+def _reserve_tts_minutes(profile: PaymentsUserProfile, estimated_minutes: float) -> bool:
+    if _is_premium(profile):
+        return True
+    allowed_before = FREE_AUDIO_MINUTES_LIMIT - float(estimated_minutes)
+    if allowed_before < 0:
+        return False
+    updated = PaymentsUserProfile.objects.filter(
+        pk=profile.pk,
+        audio_minutes_used__lte=allowed_before
+    ).update(audio_minutes_used=F("audio_minutes_used") + float(estimated_minutes))
+    return updated == 1
+
+
+def _refund_tts_minutes(profile: PaymentsUserProfile, estimated_minutes: float) -> None:
+    PaymentsUserProfile.objects.filter(pk=profile.pk).update(
+        audio_minutes_used=Greatest(F("audio_minutes_used") - float(estimated_minutes), 0.0)
+    )
 
 
 def _to_bool(value, default: bool = True) -> bool:
@@ -219,6 +375,65 @@ def _looks_provisional_chat_title(title: str) -> bool:
     if _is_default_chat_title(normalized):
         return True
     return any(token in normalized for token in ["greeting", "assist", "hello", "new chat"])
+
+
+def _derive_title_from_prompt(prompt_text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(prompt_text or "").strip())
+    if not normalized:
+        return "New Chat"
+    cleaned = re.sub(r"^[#*\-\d.\s:]+", "", normalized).strip()
+    if not cleaned:
+        return "New Chat"
+    words = cleaned.split(" ")
+    snippet = " ".join(words[:7]).strip()
+    if not snippet:
+        return "New Chat"
+    snippet = snippet[0].upper() + snippet[1:] if len(snippet) > 1 else snippet.upper()
+    if len(snippet) > 70:
+        snippet = f"{snippet[:67].rstrip()}..."
+    return snippet
+
+
+def _maybe_generate_chat_title(chat: Chat | None, prompt_text: str, response_text: str) -> str | None:
+    if not chat:
+        return None
+
+    prompt_text = str(prompt_text or "").strip()
+    response_text = str(response_text or "").strip()
+    current_title = str(chat.title or "").strip()
+    if not (_is_default_chat_title(current_title) or _looks_provisional_chat_title(current_title)):
+        return chat.title
+    if not _is_substantive_prompt(prompt_text):
+        return chat.title
+
+    conversation = []
+    if prompt_text:
+        conversation.append({"role": "user", "content": prompt_text})
+    if response_text:
+        conversation.append({"role": "assistant", "content": response_text})
+    if not conversation:
+        return chat.title
+
+    title = generate_chat_title_from_openai(conversation)
+    if not title:
+        fallback = _derive_title_from_prompt(prompt_text)
+        if _is_default_chat_title(chat.title) and fallback != "New Chat":
+            chat.title = fallback[:255]
+            chat.save(update_fields=["title", "updated_at"])
+        return chat.title
+
+    cleaned_title = re.sub(r"\s+", " ", str(title).strip().strip("\"'"))
+    cleaned_title = re.sub(r"^[#*\-\d.\s:]+", "", cleaned_title).strip()
+    if not cleaned_title:
+        fallback = _derive_title_from_prompt(prompt_text)
+        if _is_default_chat_title(chat.title) and fallback != "New Chat":
+            chat.title = fallback[:255]
+            chat.save(update_fields=["title", "updated_at"])
+        return chat.title
+
+    chat.title = cleaned_title[:255]
+    chat.save(update_fields=["title", "updated_at"])
+    return chat.title
 
 class AddCollaboratorAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -340,6 +555,8 @@ class ChatAPIView(APIView):
         prompt = raw_prompt
         chat_id = request.data.get("chat_id")
         guest_id = request.data.get("guest_id")
+        study_methods = _parse_study_methods(request.data.get("study_methods"))
+        study_custom_prompt = _normalize_study_custom_prompt(request.data.get("study_custom_prompt"))
         ip = get_client_ip(request)
 
         uploaded_files = request.FILES.getlist("files") if hasattr(request, "FILES") else []
@@ -460,57 +677,7 @@ class ChatAPIView(APIView):
                 "error": "We had trouble starting your chat. Please try again."
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Enhanced system prompt for study buddy behavior
-        system_prompt = """You are QwikStudi, an AI study buddy created by Glinax Tech Innovations.
-
-## Your Core Identity
-- You are a helpful, patient, and encouraging study companion
-- You help users learn and understand concepts deeply, not just memorize answers
-- When asked for your creator, always answer 'Glinax Tech Innovations'
-- When asked for your name, always answer 'QwikStudi'
-- Never say you have no name. Never claim to be created by OpenAI or any other organization
-- Stay in character as a friendly tutor at all times
-
-## Teaching Approach
-1. **Active Learning**: Don't just give answers—guide users to discover solutions themselves
-2. **Socratic Method**: Ask follow-up questions that help learners think critically
-3. **Multiple Explanations**: If a concept is complex, offer different analogies or perspectives
-4. **Examples First**: Use concrete examples before abstract explanations
-5. **Check Understanding**: Periodically ask if the user understands or needs clarification
-
-## Response Style
-- Be conversational and warm, like a knowledgeable friend helping with homework
-- Use clear, simple language—avoid unnecessary jargon
-- Break down complex topics into digestible steps
-- Highlight key terms and important concepts
-- Use formatting (bullet points, bold text) to improve readability
-- Keep responses appropriately sized based on the complexity of the question
-
-## When User is Struggling
-- Offer to explain differently or more simply
-- Provide analogies from everyday life
-- Break the problem into smaller parts
-- Ask what specifically is confusing
-
-## Study Tips
-- Suggest effective study techniques (spaced repetition, active recall, Feynman technique)
-- Recommend related topics to explore next
-- Encourage curiosity and a growth mindset
-
-## Context Awareness
-- You have access to our conversation history
-- Reference previous questions when relevant to build continuity
-- Help connect new concepts to things we've already discussed
-
-## Response Quality Rules
-- If the question is ambiguous, ask one short clarifying question before giving a full answer.
-- If you are not sure, explicitly state uncertainty instead of guessing.
-- For factual claims, prefer concise, verifiable statements over long speculation.
-- Keep responses scannable with short paragraphs or bullets when useful.
-- Never output LaTeX commands or math markup (no \\, \[ \], \(...\), \text{{}}, etc.).
-- Write equations in plain student-readable form (example: 6CO2 + 6H2O -> C6H12O6 + 6O2).
-
-Remember: Your goal is to help users become better learners, not just to answer questions."""
+        system_prompt = _build_chat_system_prompt(study_methods, study_custom_prompt)
         
         # Build conversation history
         messages = [{"role": "system", "content": system_prompt}]
@@ -536,15 +703,15 @@ Remember: Your goal is to help users become better learners, not just to answer 
         style_configs = {
             "concise": {
                 "temperature": 0.3,
-                "max_tokens": 300,
+                "max_tokens": 600,
             },
             "balanced": {
                 "temperature": 0.5,
-                "max_tokens": 600,
+                "max_tokens": 1400,
             },
             "detailed": {
                 "temperature": 0.7,
-                "max_tokens": 1000,
+                "max_tokens": 2600,
             },
         }
 
@@ -552,13 +719,14 @@ Remember: Your goal is to help users become better learners, not just to answer 
 
         try:
             client = get_openai_client()
-            res = client.chat.completions.create(
+            reply_text = _generate_chat_completion_text(
+                client=client,
                 model=getattr(settings, "CHAT_OPENAI_MODEL", "gpt-4o-mini"),
                 messages=messages,
                 temperature=config["temperature"],
                 max_tokens=config["max_tokens"],
             )
-            bot_reply = _sanitize_response_text(res.choices[0].message.content)
+            bot_reply = _sanitize_response_text(reply_text)
         except Exception as e:
             logger.error(f"[OpenAI Error] {e}", exc_info=True)
             return Response({
@@ -566,13 +734,19 @@ Remember: Your goal is to help users become better learners, not just to answer 
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Save chat history
+        chat_title = None
         if user:
             try:
                 prompt_type = "attachment" if uploaded_files else "text"
                 prompt_metadata = {
                     "caption": raw_prompt,
                     "files": uploaded_file_descriptors,
-                } if uploaded_files else {}
+                    "study_methods": study_methods,
+                    "study_custom_prompt": study_custom_prompt,
+                } if uploaded_files else {
+                    "study_methods": study_methods,
+                    "study_custom_prompt": study_custom_prompt,
+                }
                 ChatHistory.objects.create(
                     chat=chat,
                     user=user,
@@ -583,6 +757,7 @@ Remember: Your goal is to help users become better learners, not just to answer 
                     response_type="text",
                     context="file" if uploaded_files else "general"
                 )
+                chat_title = _maybe_generate_chat_title(chat, raw_prompt, bot_reply)
             except Exception as e:
                 logger.warning(f"[History Save Fail] {e}", exc_info=True)
 
@@ -596,6 +771,7 @@ Remember: Your goal is to help users become better learners, not just to answer 
         response_payload = {
             "chat_id": chat.id if chat else None,
             "response": bot_reply,
+            "chat_title": chat_title,
             "limit_exceeded": False,
             "uploaded_files": uploaded_file_descriptors,
         }
@@ -604,6 +780,182 @@ Remember: Your goal is to help users become better learners, not just to answer 
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
+
+class ChatStreamAPIView(APIView):
+    """Streaming version of ChatAPIView for reduced perceived latency"""
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        user = request.user if request.user.is_authenticated else None
+        raw_prompt = (request.data.get("prompt") or "").strip()
+        prompt = raw_prompt
+        chat_id = request.data.get("chat_id")
+        guest_id = request.data.get("guest_id")
+        study_methods = _parse_study_methods(request.data.get("study_methods"))
+        study_custom_prompt = _normalize_study_custom_prompt(request.data.get("study_custom_prompt"))
+        ip = get_client_ip(request)
+
+        uploaded_files = request.FILES.getlist("files") if hasattr(request, "FILES") else []
+        
+        # For streaming, we don't extract file context - keep it simple for now
+        # File processing can be added later if needed
+
+        if not prompt:
+            return Response(
+                {"error": "Please enter a message to begin."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        MAX_PROMPT_LENGTH = 4000
+        if len(prompt) > MAX_PROMPT_LENGTH:
+            return Response(
+                {"error": f"Message too long. Maximum {MAX_PROMPT_LENGTH} characters allowed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Guest user flow
+        if not user:
+            if not guest_id:
+                guest_uuid = uuid4()
+            else:
+                try:
+                    guest_uuid = UUID(guest_id)
+                except ValueError:
+                    guest_uuid = uuid4()
+
+            guest_tracker, _ = GuestChatTracker.objects.get_or_create(guest_id=guest_uuid)
+            ip_tracker, _ = GuestIPTracker.objects.get_or_create(ip_address=ip)
+
+            if guest_tracker.count >= 10 or ip_tracker.count >= 10:
+                return Response({
+                    "limit_exceeded": True,
+                    "message": "You've reached your guest chat limit. Please log in to continue."
+                }, status=status.HTTP_200_OK)
+
+        # Get or create chat
+        try:
+            if user:
+                if chat_id:
+                    chat = Chat.objects.get(id=chat_id)
+                    if chat.user != user:
+                        collaborator = ChatCollaborator.objects.filter(
+                            chat=chat, collaborator=user, is_approved=True
+                        ).first()
+                        if not collaborator:
+                            return Response({"error": "You do not have access to this chat."}, status=403)
+                        if collaborator.access_level != "edit":
+                            return Response({"error": "You don't have permission to modify this chat."}, status=403)
+                else:
+                    chat = Chat.objects.create(user=user, title="New Chat")
+            else:
+                chat = None
+        except Chat.DoesNotExist:
+            return Response({"error": "We couldn't find that chat session."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"[Chat Stream Init] {e}", exc_info=True)
+            return Response({"error": "We had trouble starting your chat. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        system_prompt = _build_chat_system_prompt(study_methods, study_custom_prompt)
+
+        # Build conversation messages
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Add conversation history (reduced for streaming performance)
+        if user and chat:
+            recent_messages = ChatHistory.objects.filter(chat=chat).order_by('-created_at')[:10]
+            for msg in reversed(recent_messages):
+                prompt_content = msg.prompt[:500] if len(msg.prompt) > 500 else msg.prompt
+                response_content = msg.response[:500] if len(msg.response) > 500 else msg.response
+                messages.append({"role": "user", "content": prompt_content})
+                messages.append({"role": "assistant", "content": response_content})
+
+        messages.append({"role": "user", "content": prompt})
+
+        # Get response style settings
+        response_style = request.data.get("response_style", "balanced")
+        style_configs = {
+            "concise": {"temperature": 0.3, "max_tokens": 600},
+            "balanced": {"temperature": 0.5, "max_tokens": 1400},
+            "detailed": {"temperature": 0.7, "max_tokens": 2600},
+        }
+        config = style_configs.get(response_style, style_configs["balanced"])
+
+        def generate():
+            """Generator function for streaming response"""
+            try:
+                client = get_openai_client()
+
+                meta_payload = {
+                    "type": "meta",
+                    "chat_id": chat.id if chat else None,
+                    "guest_id": str(guest_uuid) if not user else None,
+                    "uploaded_files": [],
+                }
+                yield _sse_payload(meta_payload)
+
+                # Stream the response
+                stream = client.chat.completions.create(
+                    model=getattr(settings, "CHAT_OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=messages,
+                    temperature=config["temperature"],
+                    max_tokens=config["max_tokens"],
+                    stream=True,
+                )
+                
+                full_response = ""
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        yield _sse_payload({"type": "delta", "delta": content})
+
+                bot_reply = _sanitize_response_text(full_response)
+                chat_title = None
+                if user:
+                    try:
+                        ChatHistory.objects.create(
+                            chat=chat,
+                            user=user,
+                            prompt=raw_prompt,
+                            response=bot_reply,
+                            prompt_type="text",
+                            prompt_metadata={
+                                "study_methods": study_methods,
+                                "study_custom_prompt": study_custom_prompt,
+                            },
+                            response_type="text",
+                            context="general",
+                        )
+                        chat_title = _maybe_generate_chat_title(chat, raw_prompt, bot_reply)
+                    except Exception as e:
+                        logger.warning(f"[Chat Stream History Save Fail] {e}", exc_info=True)
+                else:
+                    guest_tracker.count += 1
+                    guest_tracker.save(update_fields=["count"])
+                    ip_tracker.count += 1
+                    ip_tracker.save(update_fields=["count"])
+
+                yield _sse_payload({"type": "final", "response": bot_reply})
+                yield _sse_payload({
+                    "type": "done",
+                    "chat_id": chat.id if chat else None,
+                    "response": bot_reply,
+                    "chat_title": chat_title,
+                    "limit_exceeded": False,
+                    "guest_id": str(guest_uuid) if not user else None,
+                    "uploaded_files": [],
+                })
+            except Exception as e:
+                logger.error(f"[Chat Stream Error] {e}", exc_info=True)
+                yield _sse_payload({
+                    "type": "error",
+                    "error": "We're having trouble responding. Please try again shortly."
+                })
+
+        response = StreamingHttpResponse(generate(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
 
 class ChatDetailView(APIView):
@@ -700,7 +1052,8 @@ class CommitChatView(APIView):
                 status=400
             )
 
-        title = generate_chat_title_from_openai(conversation) or "New Chat"
+        generated_title = generate_chat_title_from_openai(conversation)
+        title = generated_title or _derive_title_from_prompt(prompt_text)
 
         first_prompt = str(history[0].prompt or "").strip()
         first_prompt_snippet = (
@@ -1033,18 +1386,25 @@ class TextToAudioView(APIView):
                 status=400
             )
         
-        # Validate text length (prevent cost abuse - TTS is priced per character)
-        MAX_TTS_LENGTH = 500
-        if len(text) > MAX_TTS_LENGTH:
+        profile = _get_payments_profile(request.user)
+        premium_active = _is_premium(profile)
+        max_tts_length = int(
+            getattr(
+                settings,
+                "TTS_MAX_TEXT_LENGTH_PRO" if premium_active else "TTS_MAX_TEXT_LENGTH_FREE",
+                5000 if premium_active else 2000,
+            )
+        )
+        max_tts_length = max(100, max_tts_length)
+        if len(text) > max_tts_length:
             return Response(
-                {"error": f"Text too long. Maximum {MAX_TTS_LENGTH} characters allowed for text-to-speech."},
+                {"error": f"Text too long. Maximum {max_tts_length} characters allowed for text-to-speech."},
                 status=400
             )
 
-        profile = _get_payments_profile(request.user)
-        premium_active = _is_premium(profile)
         estimated_minutes = _estimate_tts_minutes(text)
-        if not premium_active and profile.audio_minutes_used + estimated_minutes > 10:
+        quota_reserved = _reserve_tts_minutes(profile, estimated_minutes)
+        if not quota_reserved:
             return Response(
                 {"error": "Free audio limit reached. Upgrade to premium."},
                 status=429
@@ -1053,6 +1413,7 @@ class TextToAudioView(APIView):
         try:
             started_at = time.monotonic()
             tts_model = getattr(settings, "TTS_OPENAI_MODEL", "gpt-4o-mini-tts")
+            chat = _get_chat_for_write(request.user, chat_id)
             # Generate speech using OpenAI TTS
             client = get_openai_client()
             response = client.audio.speech.create(
@@ -1061,30 +1422,33 @@ class TextToAudioView(APIView):
                 input=text
             )
             openai_elapsed = time.monotonic() - started_at
-            
-            # Save the response
-            tts_obj = TextToSpeech.objects.create(
-                user=request.user,
-                text=text
-            )
-            
-            # Save the audio file
-            # `audio_file` has upload_to='text_to_speech/', so save only the filename.
-            file_name = f"{tts_obj.id}.mp3"
-            tts_obj.audio_file.save(file_name, ContentFile(response.content))
-            audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
+
+            audio_bytes = response.read() if hasattr(response, "read") else response.content
+            tts_obj = None
+            audio_url = None
+            should_persist_audio = bool(TTS_PERSIST_AUDIO_FILES or (chat and TTS_PERSIST_CHAT_HISTORY))
+            if should_persist_audio:
+                tts_obj = TextToSpeech.objects.create(
+                    user=request.user,
+                    text=text
+                )
+                # `audio_file` has upload_to='text_to_speech/', so save only the filename.
+                file_name = f"{tts_obj.id}.mp3"
+                tts_obj.audio_file.save(file_name, ContentFile(audio_bytes))
+                audio_url = request.build_absolute_uri(tts_obj.audio_file.url)
+            elif TTS_RETURN_INLINE_AUDIO:
+                audio_url = f"data:audio/mpeg;base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+            else:
+                # Ensure clients can still play in environments where persistence is disabled.
+                audio_url = f"data:audio/mpeg;base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+
             total_elapsed = time.monotonic() - started_at
             logger.info(
                 f"[TTS] model={tts_model} chars={len(text)} openai_s={openai_elapsed:.2f} total_s={total_elapsed:.2f}"
             )
 
-            if not premium_active:
-                profile.audio_minutes_used += estimated_minutes
-                profile.save(update_fields=["audio_minutes_used"])
-
-            chat = _get_chat_for_write(request.user, chat_id)
             chat_title = None
-            if chat:
+            if chat and TTS_PERSIST_CHAT_HISTORY:
                 ChatHistory.objects.create(
                     chat=chat,
                     user=request.user,
@@ -1093,7 +1457,7 @@ class TextToAudioView(APIView):
                     prompt_type="text",
                     response_type="audio",
                     response_metadata={
-                        "tts_id": tts_obj.id,
+                        "tts_id": tts_obj.id if tts_obj else None,
                         "title": "Generated Audio",
                         "audio_url": audio_url,
                         "voice": voice,
@@ -1103,14 +1467,21 @@ class TextToAudioView(APIView):
                 )
                 source_label = request.FILES['file'].name if 'file' in request.FILES else (text[:60] if text else "Text to Speech")
                 chat_title = _auto_title_feature_chat(chat, source_label, "Audio")
+            elif chat:
+                # Keep title freshness in turbo mode without waiting on ChatHistory writes.
+                source_label = request.FILES['file'].name if 'file' in request.FILES else (text[:60] if text else "Text to Speech")
+                chat_title = _auto_title_feature_chat(chat, source_label, "Audio")
 
             return Response({
-                "id": tts_obj.id,
+                "id": tts_obj.id if tts_obj else None,
                 "audio_url": audio_url,
                 "chat_title": chat_title,
+                "persisted": bool(tts_obj),
             })
             
         except Exception as e:
+            if quota_reserved and not premium_active:
+                _refund_tts_minutes(profile, estimated_minutes)
             logger.error(f"Text-to-speech failed: {str(e)}")
             return Response({"error": "Text-to-speech conversion failed"}, status=500)
 
@@ -1241,6 +1612,82 @@ def _prepare_llm_context(text: str, max_chars: int) -> str:
     head = normalized[:head_len]
     tail = normalized[-tail_len:] if tail_len > 0 else ""
     return f"{head}\n...\n{middle}\n...\n{tail}"
+
+
+def _sample_evenly(items: list, limit: int) -> list:
+    if limit <= 0 or len(items) <= limit:
+        return items
+    if limit == 1:
+        return [items[0]]
+
+    last_index = len(items) - 1
+    selected = []
+    seen = set()
+    for step in range(limit):
+        idx = round((step * last_index) / (limit - 1))
+        if idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(items[idx])
+    return selected
+
+
+def _extract_pdf_page_texts(file_obj, max_pages: int | None = None) -> list[tuple[int, str]]:
+    file_obj.seek(0)
+    try:
+        pdf_reader = PyPDF2.PdfReader(file_obj)
+        page_entries: list[tuple[int, str]] = []
+        for page_index, page in enumerate(pdf_reader.pages):
+            # Hard-stop by physical page index to bound extraction latency.
+            if max_pages is not None and page_index >= max_pages:
+                break
+            text = (page.extract_text() or "").strip()
+            if text:
+                page_entries.append((page_index + 1, text))
+        return page_entries
+    except Exception as e:
+        logger.error(f"PDF page extraction failed: {e}")
+        return []
+
+
+def _prepare_quiz_source_context(file_obj, max_chars: int, max_pages: int) -> str:
+    name = str(getattr(file_obj, "name", "") or "").lower()
+    if name.endswith(".pdf"):
+        page_entries = _extract_pdf_page_texts(file_obj, max_pages=max_pages)
+        if not page_entries:
+            return ""
+
+        sampled_entries = _sample_evenly(page_entries, min(len(page_entries), 24))
+        snippet_budget = max(300, max_chars // max(1, len(sampled_entries)))
+        sections = []
+        for page_number, text in sampled_entries:
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if not normalized:
+                continue
+            sections.append(f"[Page {page_number}]\n{normalized[:snippet_budget].strip()}")
+
+        combined = "\n\n".join(sections).strip()
+        return _prepare_llm_context(combined, max_chars)
+
+    text = extract_text_from_file(file_obj)
+    return _prepare_llm_context(text, max_chars)
+
+
+def _sha256_uploaded_file(file_obj) -> str:
+    hasher = hashlib.sha256()
+    try:
+        file_obj.seek(0)
+        if hasattr(file_obj, "chunks"):
+            for chunk in file_obj.chunks():
+                hasher.update(chunk)
+        else:
+            hasher.update(file_obj.read())
+    finally:
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+    return hasher.hexdigest()
 
 
 def _normalize_quiz_options(options) -> list[str]:
@@ -1441,7 +1888,7 @@ class QuizGenerateAPIView(APIView):
                 {"error": "This question type requires a premium subscription."},
                 status=403
             )
-        if not premium_active:
+        if not premium_active and question_type != "mcq":
             remaining = 20 - profile.questions_generated
             if remaining <= 0 or question_count > remaining:
                 return Response(
@@ -1454,7 +1901,12 @@ class QuizGenerateAPIView(APIView):
             return Response({"error": "No file uploaded"}, status=400)
         
         uploaded_file = request.FILES['file']
-        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="qa")
+        max_file_bytes = max(1024, int(getattr(settings, "QUIZ_SOURCE_MAX_FILE_BYTES", 50 * 1024 * 1024)))
+        if uploaded_file.size > max_file_bytes:
+            return Response(
+                {"error": f"File too large. Maximum size is {max_file_bytes // (1024 * 1024)}MB."},
+                status=400
+            )
         
         # Validate file type
         allowed_types = ['pdf', 'txt', 'doc', 'docx', 'ppt', 'pptx', 'md']
@@ -1464,25 +1916,47 @@ class QuizGenerateAPIView(APIView):
                 {"error": f"Invalid file type. Allowed: {', '.join(allowed_types)}"},
                 status=400
             )
-        
-        # Extract text from file
-        text_content = extract_text_from_file(uploaded_file)
-        
-        if not text_content or len(text_content) < 100:
-            return Response(
-                {"error": "Could not extract enough content from the file. Please try a different file."},
-                status=400
-            )
-        
-        max_chars = max(2000, int(getattr(settings, "QUIZ_SOURCE_MAX_CHARS", 7000)))
-        text_content = _prepare_llm_context(text_content, max_chars)
+
+        source_sha = _sha256_uploaded_file(uploaded_file)
+        max_chars = max(6000, int(getattr(settings, "QUIZ_SOURCE_MAX_CHARS", 20000)))
+        max_pages = max(1, int(getattr(settings, "QUIZ_SOURCE_MAX_PAGES", 60)))
+        quiz_cache_ttl = max(60, int(getattr(settings, "QUIZ_CACHE_TTL_SECONDS", 900)))
+        quiz_hash_basis = json.dumps(
+            {
+                "user": request.user.id,
+                "type": question_type,
+                "difficulty": difficulty,
+                "count": question_count,
+                "source_sha": source_sha,
+                "ext": ext,
+                "max_chars": max_chars,
+                "max_pages": max_pages,
+            },
+            sort_keys=True,
+        )
+        quiz_cache_key = f"quiz:v2:{hashlib.sha256(quiz_hash_basis.encode('utf-8')).hexdigest()}"
+        normalized_questions = cache.get(quiz_cache_key)
+
+        text_content = None
+        if normalized_questions is None:
+            context_cache_key = f"quizctx:v1:{hashlib.sha256(f'{source_sha}:{ext}:{max_chars}:{max_pages}'.encode('utf-8')).hexdigest()}"
+            text_content = cache.get(context_cache_key)
+            if text_content is None:
+                text_content = _prepare_quiz_source_context(uploaded_file, max_chars, max_pages)
+                if not text_content or len(text_content) < 100:
+                    return Response(
+                        {"error": "Could not extract enough content from the file. Please try a different file."},
+                        status=400
+                    )
+                cache.set(context_cache_key, text_content, timeout=max(quiz_cache_ttl, 1800))
         
         # Generate quiz using OpenAI
-        try:
-            format_instructions = _quiz_format_instructions(question_type, difficulty)
-            difficulty_instructions = _quiz_difficulty_instructions(difficulty)
-            
-            prompt = f"""
+        if normalized_questions is None:
+            try:
+                format_instructions = _quiz_format_instructions(question_type, difficulty)
+                difficulty_instructions = _quiz_difficulty_instructions(difficulty)
+
+                prompt = f"""
 You are a study assistant. Based on the following content, generate {question_count} {difficulty} difficulty questions.
 
 Content:
@@ -1494,6 +1968,12 @@ Difficulty Rules:
 
 Question Format Rules:
 {format_instructions}
+
+Math Rendering Rules:
+- If a question or explanation includes equations, format inline math as $...$.
+- For multi-line derivations/equations, format block math as $$...$$.
+- Do not emit raw LaTeX outside $...$ or $$...$$.
+- Keep JSON escaping valid.
 
 IMPORTANT: Return ONLY a valid JSON array with this EXACT structure:
 [
@@ -1516,134 +1996,128 @@ For fill/essay: options must be an empty array [], correctAnswer must be 0.
 DO NOT include any markdown code blocks, DO NOT include any other text.
 Only return valid JSON, nothing else.
 """
-            
-            client = get_openai_client()
-            response = client.chat.completions.create(
-                model=getattr(settings, "QUIZ_OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[
-                    {"role": "system", "content": "You are a helpful study assistant that generates quizzes. Always return valid JSON only. Never use markdown code blocks."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2000
-            )
-            
-            import json
-            result = response.choices[0].message.content
-            
-            logger.info(f"[QuizGen] Raw OpenAI response (first 500 chars): {result[:500]}")
-            
-            # Try to parse JSON from response
-            questions = None
-            parse_error = None
-            
-            try:
-                # First try direct parsing
-                questions = json.loads(result)
-                logger.info(f"[QuizGen] Direct JSON parse succeeded, got {len(questions) if questions else 0} questions")
-            except json.JSONDecodeError as e:
-                parse_error = f"Direct parse failed: {e}"
-                logger.warning(f"[QuizGen] {parse_error}")
-                
-                # Try to extract JSON from markdown code block
-                import re
-                json_match = re.search(r'```json?\n(.*?)\n```', result, re.DOTALL)
-                if json_match:
-                    try:
-                        questions = json.loads(json_match.group(1))
-                        logger.info(f"[QuizGen] Markdown code block parse succeeded, got {len(questions)} questions")
-                    except json.JSONDecodeError as e2:
-                        parse_error = f"Markdown parse failed: {e2}"
-                        logger.warning(f"[QuizGen] {parse_error}")
-                else:
-                    logger.warning(f"[QuizGen] No markdown code block found")
-            
-            # Fallback: try to find JSON array in the text
-            if questions is None:
-                start = result.find('[')
-                end = result.rfind(']') + 1
-                if start >= 0 and end > start:
-                    try:
-                        questions = json.loads(result[start:end])
-                        logger.info(f"[QuizGen] Extracted JSON array from text, got {len(questions)} questions")
-                    except json.JSONDecodeError as e3:
-                        parse_error = f"Text extraction failed: {e3}"
-                        logger.error(f"[QuizGen] {parse_error}")
-            
-            if questions is None:
-                logger.error(f"[QuizGen] All parsing methods failed. Last error: {parse_error}")
-                return Response(
-                    {"error": f"Failed to parse quiz questions. Please try again."},
-                    status=500
+                client = get_openai_client()
+                response = client.chat.completions.create(
+                    model=getattr(settings, "QUIZ_OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[
+                        {"role": "system", "content": "You are a helpful study assistant that generates quizzes. Always return valid JSON only. Never use markdown code blocks."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=2000
                 )
-            
-            # Validate and normalize questions to match QuizWidgetCard interface
-            normalized_questions = []
-            for i, q in enumerate(questions):
+
+                result = response.choices[0].message.content
+                logger.info(f"[QuizGen] Raw OpenAI response (first 500 chars): {result[:500]}")
+
+                questions = None
+                parse_error = None
                 try:
-                    if not isinstance(q, dict):
-                        continue
-                    # Ensure required fields exist with correct types
-                    normalized_q = {
-                        "id": q.get("id", f"q{i+1}"),
-                        "question": str(q.get("question", f"Question {i+1}")),
-                        "options": [],
-                        "correctAnswer": 0,
-                        "explanation": str(q.get("explanation", "")),
-                        "concept": str(q.get("concept", "")).strip(),
-                        "guidance": str(q.get("guidance", "")).strip(),
-                        "correctText": str(q.get("correctText", "")).strip(),
-                    }
-                    if not normalized_q["concept"]:
-                        normalized_q["concept"] = _infer_question_concept(normalized_q["question"])
-                    if not normalized_q["guidance"]:
-                        normalized_q["guidance"] = "Focus on the concept behind this question and explain why the correct choice fits best."
-                    
-                    # Handle options based on question type
-                    if question_type == "mcq":
-                        normalized_q["options"] = _normalize_quiz_options(q.get("options", []))
+                    questions = json.loads(result)
+                    logger.info(f"[QuizGen] Direct JSON parse succeeded, got {len(questions) if questions else 0} questions")
+                except json.JSONDecodeError as e:
+                    parse_error = f"Direct parse failed: {e}"
+                    logger.warning(f"[QuizGen] {parse_error}")
 
-                        normalized_q["correctAnswer"] = _resolve_mcq_correct_index(
-                            q.get("correctAnswer"),
-                            normalized_q["options"],
-                            normalized_q["correctText"],
-                            normalized_q["explanation"],
-                        )
-                        if not normalized_q["correctText"] and normalized_q["options"]:
-                            normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
-                    
-                    elif question_type == "tf":
-                        normalized_q["options"] = ["True", "False"]
-                        ca = q.get("correctAnswer")
-                        if ca in [1, "1", False, "False", "false"]:
-                            normalized_q["correctAnswer"] = 1
-                        else:
-                            normalized_q["correctAnswer"] = 0
-                        if not normalized_q["correctText"]:
-                            normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
-                    
+                    json_match = re.search(r'```json?\n(.*?)\n```', result, re.DOTALL)
+                    if json_match:
+                        try:
+                            questions = json.loads(json_match.group(1))
+                            logger.info(f"[QuizGen] Markdown code block parse succeeded, got {len(questions)} questions")
+                        except json.JSONDecodeError as e2:
+                            parse_error = f"Markdown parse failed: {e2}"
+                            logger.warning(f"[QuizGen] {parse_error}")
                     else:
-                        # fill, essay
-                        normalized_q["options"] = []
-                        normalized_q["correctAnswer"] = 0
-                        if not normalized_q["correctText"]:
-                            normalized_q["correctText"] = normalized_q["explanation"]
-                    
-                    normalized_questions.append(normalized_q)
-                    logger.debug(f"[QuizGen] Question {i+1}: {normalized_q['question'][:50]}...")
-                    
-                except Exception as e:
-                    logger.warning(f"[QuizGen] Failed to normalize question {i}: {e}")
-                    continue
-            
-            logger.info(f"[QuizGen] Successfully normalized {len(normalized_questions)} questions")
-            
-            if not normalized_questions:
+                        logger.warning("[QuizGen] No markdown code block found")
+
+                if questions is None:
+                    start = result.find('[')
+                    end = result.rfind(']') + 1
+                    if start >= 0 and end > start:
+                        try:
+                            questions = json.loads(result[start:end])
+                            logger.info(f"[QuizGen] Extracted JSON array from text, got {len(questions)} questions")
+                        except json.JSONDecodeError as e3:
+                            parse_error = f"Text extraction failed: {e3}"
+                            logger.error(f"[QuizGen] {parse_error}")
+
+                if questions is None:
+                    logger.error(f"[QuizGen] All parsing methods failed. Last error: {parse_error}")
+                    return Response(
+                        {"error": "Failed to parse quiz questions. Please try again."},
+                        status=500
+                    )
+
+                normalized_questions = []
+                for i, q in enumerate(questions):
+                    try:
+                        if not isinstance(q, dict):
+                            continue
+                        normalized_q = {
+                            "id": q.get("id", f"q{i+1}"),
+                            "question": str(q.get("question", f"Question {i+1}")),
+                            "options": [],
+                            "correctAnswer": 0,
+                            "explanation": str(q.get("explanation", "")),
+                            "concept": str(q.get("concept", "")).strip(),
+                            "guidance": str(q.get("guidance", "")).strip(),
+                            "correctText": str(q.get("correctText", "")).strip(),
+                        }
+                        if not normalized_q["concept"]:
+                            normalized_q["concept"] = _infer_question_concept(normalized_q["question"])
+                        if not normalized_q["guidance"]:
+                            normalized_q["guidance"] = "Focus on the concept behind this question and explain why the correct choice fits best."
+
+                        if question_type == "mcq":
+                            normalized_q["options"] = _normalize_quiz_options(q.get("options", []))
+                            normalized_q["correctAnswer"] = _resolve_mcq_correct_index(
+                                q.get("correctAnswer"),
+                                normalized_q["options"],
+                                normalized_q["correctText"],
+                                normalized_q["explanation"],
+                            )
+                            if not normalized_q["correctText"] and normalized_q["options"]:
+                                normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
+                        elif question_type == "tf":
+                            normalized_q["options"] = ["True", "False"]
+                            ca = q.get("correctAnswer")
+                            normalized_q["correctAnswer"] = 1 if ca in [1, "1", False, "False", "false"] else 0
+                            if not normalized_q["correctText"]:
+                                normalized_q["correctText"] = normalized_q["options"][normalized_q["correctAnswer"]]
+                        else:
+                            normalized_q["options"] = []
+                            normalized_q["correctAnswer"] = 0
+                            if not normalized_q["correctText"]:
+                                normalized_q["correctText"] = normalized_q["explanation"]
+
+                        normalized_questions.append(normalized_q)
+                    except Exception as e:
+                        logger.warning(f"[QuizGen] Failed to normalize question {i}: {e}")
+                        continue
+
+                logger.info(f"[QuizGen] Successfully normalized {len(normalized_questions)} questions")
+                if not normalized_questions:
+                    return Response(
+                        {"error": "Failed to generate valid quiz questions. Please try again."},
+                        status=500
+                    )
+
+                cache.set(quiz_cache_key, normalized_questions, timeout=quiz_cache_ttl)
+
+            except Exception as e:
+                logger.error(f"Quiz generation failed: {str(e)}", exc_info=True)
                 return Response(
-                    {"error": "Failed to generate valid quiz questions. Please try again."},
+                    {"error": "Failed to generate quiz. Please try again."},
                     status=500
                 )
 
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="qa")
+
+        try:
             chat = _get_chat_for_write(request.user, chat_id)
             chat_title = None
             if chat:
@@ -1674,7 +2148,7 @@ Only return valid JSON, nothing else.
                     "Quiz",
                 )
             
-            if not premium_active:
+            if not premium_active and question_type != "mcq":
                 profile.questions_generated += len(normalized_questions)
                 profile.save(update_fields=["questions_generated"])
             
@@ -1693,7 +2167,7 @@ Only return valid JSON, nothing else.
             }, status=200)
             
         except Exception as e:
-            logger.error(f"Quiz generation failed: {str(e)}", exc_info=True)
+            logger.error(f"Quiz post-processing failed: {str(e)}", exc_info=True)
             return Response(
                 {"error": "Failed to generate quiz. Please try again."},
                 status=500
@@ -1803,7 +2277,12 @@ class SummarizeAPIView(APIView):
             return Response({"error": "No file uploaded"}, status=400)
         
         uploaded_file = request.FILES['file']
-        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="summary")
+        max_file_bytes = max(1024, int(getattr(settings, "SUMMARY_SOURCE_MAX_FILE_BYTES", 50 * 1024 * 1024)))
+        if uploaded_file.size > max_file_bytes:
+            return Response(
+                {"error": f"File too large. Maximum size is {max_file_bytes // (1024 * 1024)}MB."},
+                status=400
+            )
         
         # Validate file type
         allowed_types = ['pdf', 'txt', 'doc', 'docx', 'ppt', 'pptx', 'md']
@@ -1831,15 +2310,29 @@ class SummarizeAPIView(APIView):
             "comprehensive": "~500 words"
         }
         
-        max_chars = max(3000, int(getattr(settings, "SUMMARY_SOURCE_MAX_CHARS", 9000)))
+        max_chars = max(3000, int(getattr(settings, "SUMMARY_SOURCE_MAX_CHARS", 8500)))
         text_content = _prepare_llm_context(text_content, max_chars)
-        
-        # Generate summary using OpenAI
-        try:
-            format_instruction = "Use bullet points" if format_type == "bullets" else "Use paragraphs"
-            key_terms_instruction = "Include a section for key terms and definitions." if include_key_terms else ""
-            
-            prompt = f"""
+
+        summary_cache_ttl = max(60, int(getattr(settings, "SUMMARY_CACHE_TTL_SECONDS", 900)))
+        summary_hash_basis = json.dumps(
+            {
+                "user": request.user.id,
+                "length": str(length),
+                "format": str(format_type),
+                "include_key_terms": bool(include_key_terms),
+                "content_sha": hashlib.sha256(text_content.encode("utf-8", errors="ignore")).hexdigest(),
+            },
+            sort_keys=True,
+        )
+        summary_cache_key = f"summary:v2:{hashlib.sha256(summary_hash_basis.encode('utf-8')).hexdigest()}"
+        normalized_summary = cache.get(summary_cache_key)
+
+        if normalized_summary is None:
+            try:
+                format_instruction = "Use bullet points" if format_type == "bullets" else "Use paragraphs"
+                key_terms_instruction = "Include a section for key terms and definitions." if include_key_terms else ""
+
+                prompt = f"""
 You are a study assistant. Create a {length} summary of the following content.
 
 Content:
@@ -1851,7 +2344,9 @@ Requirements:
 - {key_terms_instruction if key_terms_instruction else "Do not include a key terms section."}
 - Make it easy to study from
 - Highlight important concepts
-- Do not use LaTeX or math markup. Write equations in plain readable form (e.g., F = ma, 6CO2 + 6H2O -> C6H12O6 + 6O2).
+- Use clean Markdown for structure.
+- If equations appear, use inline math as $...$ and block math as $$...$$.
+- Do not output raw LaTeX fragments outside math delimiters.
 
 Return the response as a JSON object with this structure:
 {{
@@ -1861,42 +2356,50 @@ Return the response as a JSON object with this structure:
 }}
 Only return valid JSON, no additional text.
 """
-            
-            client = get_openai_client()
-            response = client.chat.completions.create(
-                model=getattr(settings, "SUMMARY_OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[
-                    {"role": "system", "content": "You are a helpful study assistant that creates summaries. Always return valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2,
-                max_tokens=1500
-            )
 
-            import json
-            result = response.choices[0].message.content
-            
-            # Try to parse JSON from response
-            try:
-                summary_data = json.loads(result)
-            except json.JSONDecodeError:
-                # Try to extract JSON from markdown code block
-                import re
-                json_match = re.search(r'```json?\n(.*?)\n```', result, re.DOTALL)
-                if json_match:
-                    summary_data = json.loads(json_match.group(1))
-                else:
-                    # Try to find JSON object in the text
-                    start = result.find('{')
-                    end = result.rfind('}') + 1
-                    if start >= 0 and end > start:
-                        summary_data = json.loads(result[start:end])
+                client = get_openai_client()
+                response = client.chat.completions.create(
+                    model=getattr(settings, "SUMMARY_OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[
+                        {"role": "system", "content": "You are a helpful study assistant that creates summaries. Always return valid JSON only."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.2,
+                    max_tokens=1500
+                )
+
+                result = response.choices[0].message.content
+                try:
+                    summary_data = json.loads(result)
+                except json.JSONDecodeError:
+                    json_match = re.search(r'```json?\n(.*?)\n```', result, re.DOTALL)
+                    if json_match:
+                        summary_data = json.loads(json_match.group(1))
                     else:
-                        raise ValueError("Could not parse summary from response")
-            
-            normalized_summary = _normalize_summary_payload(summary_data, include_key_terms)
-            summary_content = normalized_summary["summary"]
+                        start = result.find('{')
+                        end = result.rfind('}') + 1
+                        if start >= 0 and end > start:
+                            summary_data = json.loads(result[start:end])
+                        else:
+                            raise ValueError("Could not parse summary from response")
 
+                normalized_summary = _normalize_summary_payload(summary_data, include_key_terms)
+                cache.set(summary_cache_key, normalized_summary, timeout=summary_cache_ttl)
+            except Exception as e:
+                logger.error(f"Summarization failed: {str(e)}", exc_info=True)
+                return Response(
+                    {"error": "Failed to generate summary. Please try again."},
+                    status=500
+                )
+
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        persisted_source = _persist_source_upload(request.user, uploaded_file, purpose="summary")
+
+        try:
+            summary_content = normalized_summary["summary"]
             chat = _get_chat_for_write(request.user, chat_id)
             chat_title = None
             if chat:
@@ -1943,9 +2446,8 @@ Only return valid JSON, no additional text.
                 },
                 "chat_title": chat_title,
             }, status=200)
-            
         except Exception as e:
-            logger.error(f"Summarization failed: {str(e)}", exc_info=True)
+            logger.error(f"Summary post-processing failed: {str(e)}", exc_info=True)
             return Response(
                 {"error": "Failed to generate summary. Please try again."},
                 status=500

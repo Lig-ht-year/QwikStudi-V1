@@ -33,6 +33,8 @@ const lengthOptions = [
     { id: "comprehensive", name: "Comprehensive", description: "Full coverage", words: "~500 words" },
 ];
 
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+
 export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: SummarizeModalProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [length, setLength] = useState<"brief" | "detailed" | "comprehensive">("detailed");
@@ -41,8 +43,6 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
     const [isGenerating, setIsGenerating] = useState(false);
     const [submitError, setSubmitError] = useState("");
     const clearSelectedContent = useDataStore((state) => state.clearSelectedContent);
-    const MAX_FILE_SIZE = 10 * 1024 * 1024;
-
     // Get content from store when modal opens (if no initialContent prop)
     const content = initialContent || useDataStore.getState().selectedContent.content;
 
@@ -152,6 +152,7 @@ export function SummarizeModal({ isOpen, onClose, onGenerate, initialContent }: 
                         ) : (
                             <div className="text-center">
                                 <p className="text-xs font-medium text-muted-foreground">Drop file or click to browse</p>
+                                <p className="text-[10px] text-muted-foreground/70 mt-0.5">Supports up to 50MB</p>
                             </div>
                         )}
                     </div>

@@ -14,6 +14,9 @@ import { nanoid } from "nanoid";
 import api from "@/lib/api";
 import Cookies from "js-cookie";
 import { useToast } from "@/components/Toast";
+import { getStudyMethodLabel } from "@/lib/studyMethods";
+import type { StudyMethod } from "@/stores/dataStore";
+import { canRegenerateMessage, getLatestAssistantMessageId } from "@/lib/chatRegenerate";
 
 
 // Calculate Easter date using Computus algorithm (Anonymous Gregorian algorithm)
@@ -146,6 +149,95 @@ function normalizeMetadata(value: unknown): Record<string, unknown> | undefined 
     return value as Record<string, unknown>;
 }
 
+function normalizeStudyMethods(value: unknown): StudyMethod[] {
+    if (!Array.isArray(value)) return [];
+    const valid: StudyMethod[] = [
+        'feynman',
+        'active_recall',
+        'spaced_repetition',
+        'socratic',
+        'interleaving',
+        'exam_drill',
+    ];
+    return value
+        .map((item) => String(item || "").trim())
+        .filter((item): item is StudyMethod => valid.includes(item as StudyMethod));
+}
+
+type BackendChatMessage = {
+    id: number;
+    prompt: string;
+    response: string;
+    created_at: string;
+    prompt_type?: string;
+    prompt_metadata?: Record<string, unknown>;
+    response_type?: string;
+    response_metadata?: Record<string, unknown>;
+};
+
+function mapBackendMessages(data: BackendChatMessage[]) {
+    let lastStudyMethods: StudyMethod[] | null = null;
+    let lastStudyCustomPrompt = "";
+
+    const messages = data.flatMap((msg) => {
+        const createdAt = new Date(msg.created_at);
+        const mappedMessages: Array<{
+            id: string;
+            role: 'user' | 'assistant';
+            content: string;
+            createdAt: Date;
+            type?: RichMessageType;
+            metadata?: Record<string, unknown>;
+        }> = [];
+
+        const promptType = normalizeMessageType(msg.prompt_type);
+        const promptMetadata = normalizeMetadata(msg.prompt_metadata);
+        const metadataStudyMethods = normalizeStudyMethods(promptMetadata?.study_methods);
+        const metadataStudyCustomPrompt =
+            typeof promptMetadata?.study_custom_prompt === "string"
+                ? promptMetadata.study_custom_prompt.trim()
+                : "";
+
+        if (metadataStudyMethods.length > 0 || metadataStudyCustomPrompt) {
+            lastStudyMethods = metadataStudyMethods;
+            lastStudyCustomPrompt = metadataStudyCustomPrompt;
+        }
+
+        const hasAttachmentFiles =
+            promptType === 'attachment' &&
+            Array.isArray((promptMetadata as { files?: unknown[] } | undefined)?.files) &&
+            ((promptMetadata as { files?: unknown[] } | undefined)?.files?.length || 0) > 0;
+
+        if ((msg.prompt && msg.prompt.trim().length > 0) || hasAttachmentFiles) {
+            mappedMessages.push({
+                id: nanoid(),
+                role: 'user',
+                content: msg.prompt,
+                createdAt,
+                type: promptType,
+                metadata: promptMetadata,
+            });
+        }
+
+        mappedMessages.push({
+            id: nanoid(),
+            role: 'assistant',
+            content: msg.response,
+            createdAt,
+            type: normalizeMessageType(msg.response_type),
+            metadata: normalizeMetadata(msg.response_metadata),
+        });
+
+        return mappedMessages;
+    });
+
+    return {
+        messages,
+        studyMethods: lastStudyMethods ?? [],
+        studyCustomPrompt: lastStudyCustomPrompt,
+    };
+}
+
 export function ChatContainer() {
     const router = useRouter();
     const { showToast } = useToast();
@@ -157,22 +249,33 @@ export function ChatContainer() {
     const hasHydrated = useDataStore((state) => state.hasHydrated);
     const language = useDataStore((state) => state.language);
     const activeSessionId = useDataStore((state) => state.activeSessionId);
+    const sessions = useDataStore((state) => state.sessions);
     const chatId = useDataStore((state) => state.chatId);
     const aiSettings = useDataStore((state) => state.aiSettings);
     const addMessage = useDataStore((state) => state.addMessage);
+    const setMessages = useDataStore((state) => state.setMessages);
+    const updateSession = useDataStore((state) => state.updateSession);
     const t = translations[language];
     const isLoading = useUIStore((state) => state.isLoading);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
     const setExplainPrompt = useUIStore((state) => state.setExplainPrompt);
     const setIsLoading = useUIStore((state) => state.setIsLoading);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
     const previousLastMessageId = useRef<string | null>(null);
+    const previousSessionId = useRef<string | null>(null);
 
     // Dynamic greeting state
     const [greeting, setGreeting] = useState("");
     const [tagline, setTagline] = useState("");
     const [mounted, setMounted] = useState(false);
+    const [historyLoadError, setHistoryLoadError] = useState<string | null>(null);
+    const [historyLoadVersion, setHistoryLoadVersion] = useState(0);
+    const [isSwitchingSession, setIsSwitchingSession] = useState(false);
+    const activeSession = activeSessionId
+        ? sessions.find((session) => session.id === activeSessionId)
+        : null;
+    const selectedStudyMethods = activeSession?.studyMethods ?? aiSettings.studyMethods ?? [];
+    const studyCustomPrompt = activeSession?.studyCustomPrompt ?? aiSettings.studyCustomPrompt ?? "";
 
     // Set greeting on mount (client-side only to avoid hydration mismatch)
     useEffect(() => {
@@ -191,65 +294,60 @@ export function ChatContainer() {
     // Load messages when a session is selected
     useEffect(() => {
         let isMounted = true;
+        const switchedSessions = previousSessionId.current !== activeSessionId;
+        previousSessionId.current = activeSessionId;
 
         const loadSessionMessages = async () => {
+            if (!activeSessionId) {
+                setHistoryLoadError(null);
+                setIsSwitchingSession(false);
+                return;
+            }
+
+            if (switchedSessions) {
+                setIsSwitchingSession(true);
+            }
+
+            if (!chatId) {
+                // Draft sessions can exist locally before they have a persisted backend chat id.
+                setHistoryLoadError(null);
+                setIsSwitchingSession(false);
+                return;
+            }
+
+            if (!switchedSessions && useDataStore.getState().messages.length > 0) {
+                // Don't clobber an in-flight streamed conversation for the current active session.
+                setIsSwitchingSession(false);
+                return;
+            }
+
             if (activeSessionId && chatId) {
                 const { error, data } = await getChatMessages(Number(chatId));
                 if (!isMounted) return;
 
-                // Always clear previous chat content when switching sessions.
-                // If the target session is empty (or fails to load), the UI should stay empty.
-                useDataStore.getState().clearMessages();
-                if (error || data.length === 0) {
+                if (error) {
+                    setHistoryLoadError(error);
+                    setIsSwitchingSession(false);
+                    showToast(error, "error");
                     return;
                 }
 
-                // Convert backend messages to frontend format
-                const loadedMessages = data.flatMap((msg) => {
-                    const createdAt = new Date(msg.created_at);
-                    const mappedMessages: Array<{
-                        id: string;
-                        role: 'user' | 'assistant';
-                        content: string;
-                        createdAt: Date;
-                        type?: RichMessageType;
-                        metadata?: Record<string, unknown>;
-                    }> = [];
+                setHistoryLoadError(null);
+                if (data.length === 0) {
+                    setMessages([]);
+                    setIsSwitchingSession(false);
+                    return;
+                }
 
-                        const promptType = normalizeMessageType(msg.prompt_type);
-                        const promptMetadata = normalizeMetadata(msg.prompt_metadata);
-                        const hasAttachmentFiles =
-                            promptType === 'attachment' &&
-                            Array.isArray((promptMetadata as { files?: unknown[] } | undefined)?.files) &&
-                            ((promptMetadata as { files?: unknown[] } | undefined)?.files?.length || 0) > 0;
-
-                        if ((msg.prompt && msg.prompt.trim().length > 0) || hasAttachmentFiles) {
-                            mappedMessages.push({
-                                id: nanoid(),
-                                role: 'user',
-                                content: msg.prompt,
-                                createdAt,
-                                type: promptType,
-                                metadata: promptMetadata,
-                            });
-                        }
-
-                    mappedMessages.push({
-                        id: nanoid(),
-                        role: 'assistant',
-                        content: msg.response,
-                        createdAt,
-                        type: normalizeMessageType(msg.response_type),
-                        metadata: normalizeMetadata(msg.response_metadata),
+                const mapped = mapBackendMessages(data);
+                setMessages(mapped.messages);
+                if (activeSessionId && (mapped.studyMethods.length > 0 || mapped.studyCustomPrompt)) {
+                    updateSession(activeSessionId, {
+                        studyMethods: mapped.studyMethods,
+                        studyCustomPrompt: mapped.studyCustomPrompt,
                     });
-
-                    return mappedMessages;
-                });
-
-                loadedMessages.forEach(msg => useDataStore.getState().addMessage(msg));
-            } else if (!activeSessionId || (activeSessionId && !chatId)) {
-                // Clear messages when no session is selected
-                useDataStore.getState().clearMessages();
+                }
+                setIsSwitchingSession(false);
             }
         };
 
@@ -258,7 +356,7 @@ export function ChatContainer() {
         return () => {
             isMounted = false;
         };
-    }, [activeSessionId, chatId]);
+    }, [activeSessionId, chatId, historyLoadVersion, setMessages, showToast, updateSession]);
 
     const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
         if (!scrollRef.current) return;
@@ -266,6 +364,12 @@ export function ChatContainer() {
             top: scrollRef.current.scrollHeight,
             behavior,
         });
+    };
+
+    const isNearBottom = () => {
+        if (!scrollRef.current) return false;
+        const { scrollHeight, scrollTop, clientHeight } = scrollRef.current;
+        return scrollHeight - scrollTop - clientHeight < 160;
     };
 
     useEffect(() => {
@@ -278,15 +382,13 @@ export function ChatContainer() {
         // Avoid jump on initial hydration/history load
         if (!previousId) return;
 
-        if (lastMessage.role === "assistant") {
-            const target = messageRefs.current[lastMessage.id];
-            if (target) {
-                target.scrollIntoView({ behavior: "smooth", block: "start" });
-                return;
+        if (previousId === lastMessage.id) {
+            if (lastMessage.role === "assistant" && isNearBottom()) {
+                scrollToBottom("auto");
             }
+            return;
         }
 
-        // Keep user send / typing flow anchored near composer
         scrollToBottom("smooth");
     }, [messages]);
 
@@ -302,8 +404,14 @@ export function ChatContainer() {
             case 1: setActiveModal('summarize'); break;
             case 2: setActiveModal('tts'); break;
             case 3:
+                const methodsText = selectedStudyMethods.length
+                    ? ` Use these study methods: ${selectedStudyMethods.map(getStudyMethodLabel).join(", ")}.`
+                    : "";
+                const customText = studyCustomPrompt
+                    ? ` Additional instruction: ${studyCustomPrompt}.`
+                    : "";
                 setExplainPrompt(
-                    "Explain this topic step-by-step in simple terms. Then add one practical example and 3 quick check questions: "
+                    `Explain this topic step-by-step in simple terms.${methodsText}${customText} Then add one practical example and 3 quick check questions: `
                 );
                 showToast("Explain mode ready. Type a topic and send.", "info");
                 break;
@@ -311,35 +419,49 @@ export function ChatContainer() {
         }
     };
 
-    // Regenerate last AI response
-    const handleRegenerate = async () => {
-        const currentMessages = useDataStore.getState().messages;
-        
-        // Find the last user message
-        const lastUserIndex = currentMessages.findLastIndex(m => m.role === 'user');
-        if (lastUserIndex === -1) return;
-        
-        const lastUserMessage = currentMessages[lastUserIndex];
-        
-        // Remove the last AI response if it exists
-        const messagesWithoutLastAI = currentMessages.slice(0, lastUserIndex + 1);
-        
-        // Clear messages and add up to the last user message
-        useDataStore.getState().clearMessages();
-        messagesWithoutLastAI.forEach(msg => useDataStore.getState().addMessage(msg));
-        
-        // Call the API to get a new response
-        const guestId = Cookies.get("guest_id");
-        const currentChatId = useDataStore.getState().chatId;
-        
-        setIsLoading(true);
-        
+    const latestAssistantMessageId = useMemo(() => getLatestAssistantMessageId(messages), [messages]);
+
+    // Regenerate the latest AI response only. Older turns would require backend branching support.
+    const handleRegenerate = async (assistantMessageId: string) => {
         try {
+            const currentMessages = useDataStore.getState().messages;
+
+            if (!canRegenerateMessage(currentMessages, assistantMessageId)) {
+                showToast("Only the latest response can be regenerated right now.", "info");
+                return;
+            }
+            
+            // Find the last user message
+            const lastUserIndex = currentMessages.findLastIndex(m => m.role === 'user');
+            if (lastUserIndex === -1) return;
+            
+            const lastUserMessage = currentMessages[lastUserIndex];
+
+            // File-based prompts require re-uploading files; avoid destructive regeneration.
+            if (lastUserMessage.type === 'attachment') {
+                showToast("Regeneration for file uploads isn't supported yet. Please resend the file.", "info");
+                return;
+            }
+
+            const promptForRegeneration = String(lastUserMessage.content || "").trim();
+            if (!promptForRegeneration) {
+                showToast("Couldn't regenerate because the original prompt is empty.", "error");
+                return;
+            }
+            
+            // Call the API to get a new response
+            const guestId = Cookies.get("guest_id");
+            const currentChatId = useDataStore.getState().chatId;
+            
+            setIsLoading(true);
+
             const res = await api.post("/chat/", {
-                prompt: lastUserMessage.content,
+                prompt: promptForRegeneration,
                 guest_id: guestId,
                 chat_id: currentChatId,
                 response_style: aiSettings.responseStyle,
+                study_methods: selectedStudyMethods,
+                study_custom_prompt: studyCustomPrompt,
             });
 
             // Store the chat_id from response if not already set
@@ -347,25 +469,54 @@ export function ChatContainer() {
                 useDataStore.getState().setChatId(res.data.chat_id);
             }
 
-            // Add new AI response
-            addMessage({
-                id: nanoid(),
-                role: 'assistant',
-                content: res.data.response,
-                createdAt: new Date(),
-            });
+            const nextChatId = typeof res.data.chat_id === "number" ? res.data.chat_id : currentChatId;
+            if (nextChatId) {
+                const { error, data } = await getChatMessages(Number(nextChatId));
+                if (error) {
+                    setHistoryLoadError(error);
+                    showToast(error, "error");
+                    return;
+                }
+
+                const mapped = mapBackendMessages(data);
+                setMessages(mapped.messages);
+                setHistoryLoadError(null);
+
+                if (activeSessionId) {
+                    updateSession(activeSessionId, {
+                        ...(typeof res.data.chat_title === "string" && res.data.chat_title.trim()
+                            ? { title: res.data.chat_title.trim() }
+                            : {}),
+                        ...(currentChatId ? {} : { chatId: nextChatId }),
+                        lastMessageAt: new Date(),
+                    });
+                }
+            } else {
+                addMessage({
+                    id: nanoid(),
+                    role: 'assistant',
+                    content: res.data.response,
+                    createdAt: new Date(),
+                });
+            }
         } catch (error) {
             console.error("Regeneration failed:", error);
-            addMessage({
-                id: nanoid(),
-                role: 'assistant',
-                content: "Sorry, I couldn't regenerate the response. Please try again.",
-                createdAt: new Date(),
-            });
+            showToast("Sorry, I couldn't regenerate the response. Please try again.", "error");
         } finally {
             setIsLoading(false);
         }
     };
+
+    const hasPendingAssistantMessage = useMemo(
+        () =>
+            messages.some(
+                (message) =>
+                    message.role === "assistant" &&
+                    typeof message.content === "string" &&
+                    message.content.trim().length === 0
+            ),
+        [messages]
+    );
 
     return (
         <div className="flex flex-col h-full relative">
@@ -381,6 +532,20 @@ export function ChatContainer() {
                     "max-w-3xl mx-auto w-full pt-24",
                     isLimitExceeded ? "pb-[22rem]" : "pb-48"
                 )}>
+                    {historyLoadError && (
+                        <div className="mb-6 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-foreground/85">
+                            <div className="flex items-center justify-between gap-3">
+                                <p>Couldn&apos;t load the full chat history. Showing the latest local state.</p>
+                                <button
+                                    type="button"
+                                    onClick={() => setHistoryLoadVersion((value) => value + 1)}
+                                    className="shrink-0 rounded-lg border border-amber-500/25 px-3 py-1.5 text-xs font-medium text-amber-600 transition-colors hover:bg-amber-500/10"
+                                >
+                                    Retry
+                                </button>
+                            </div>
+                        </div>
+                    )}
                     {messages.length === 0 ? (
                         <div className="flex flex-col items-center justify-center min-h-[50vh] text-center space-y-8 animate-in fade-in zoom-in duration-500">
                             {/* Dynamic Greeting */}
@@ -424,26 +589,37 @@ export function ChatContainer() {
                             )}
                         </div>
                     ) : (
-                        messages.map((message) => (
-                            <div
-                                key={message.id}
-                                ref={(el) => {
-                                    messageRefs.current[message.id] = el;
-                                }}
-                            >
-                                <MessageBubble
-                                    role={message.role}
-                                    content={message.content}
-                                    createdAt={message.createdAt}
-                                    type={message.type}
-                                    metadata={message.metadata}
-                                    onRegenerate={message.role === 'assistant' && !isLoading ? handleRegenerate : undefined}
-                                />
-                            </div>
-                        ))
+                        <div className={cn("transition-opacity duration-200", isSwitchingSession && "opacity-35")}>
+                            {messages.map((message) => (
+                                <div key={message.id}>
+                                    <MessageBubble
+                                        role={message.role}
+                                        content={message.content}
+                                        createdAt={message.createdAt}
+                                        type={message.type}
+                                        metadata={message.metadata}
+                                        onRegenerate={
+                                            message.role === 'assistant' &&
+                                            !isLoading &&
+                                            message.id === latestAssistantMessageId
+                                                ? () => handleRegenerate(message.id)
+                                                : undefined
+                                        }
+                                    />
+                                </div>
+                            ))}
+                        </div>
                     )}
 
-                    {isLoading && (
+                    {isSwitchingSession && (
+                        <div className="mb-6 flex justify-center animate-in fade-in duration-200">
+                            <div className="rounded-xl border border-white/10 bg-card/50 px-3 py-2 text-xs text-muted-foreground">
+                                Loading chat...
+                            </div>
+                        </div>
+                    )}
+
+                    {isLoading && !hasPendingAssistantMessage && (
                         <div className="w-full mb-8 animate-in fade-in slide-in-from-bottom-2 duration-300" aria-live="polite" aria-atomic="true">
                             <div className="pl-9">
                                 <div className="inline-flex items-center gap-3 rounded-2xl border border-white/10 bg-card/50 px-4 py-3">

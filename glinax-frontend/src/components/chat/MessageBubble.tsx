@@ -11,6 +11,7 @@ import { QuizWidgetCard, type Question } from "../cards/QuizWidgetCard";
 import { SummaryCard } from "../cards/SummaryCard";
 import { NotesCard } from "../cards/NotesCard";
 import { FeedbackModal } from "../modals/FeedbackModal";
+import { StudyMarkdown } from "../common/StudyMarkdown";
 
 interface MessageBubbleProps {
     role: 'user' | 'assistant';
@@ -18,7 +19,7 @@ interface MessageBubbleProps {
     createdAt: Date;
     type?: 'text' | 'audio' | 'quiz' | 'summary' | 'notes' | 'attachment';
     metadata?: Record<string, unknown>;
-    onRegenerate?: () => void;
+    onRegenerate?: () => void | Promise<void>;
     onRate?: (rating: 'like' | 'dislike' | null) => void;
 }
 
@@ -70,6 +71,16 @@ function formatContentForDisplay(content: unknown): string {
         }
     }
     return String(content);
+}
+
+function renderTextBlocks(content: string, isLoadingPlaceholder: boolean) {
+    const textTone = isLoadingPlaceholder
+        ? "text-foreground/70 italic animate-pulse"
+        : "text-foreground/90";
+
+    return (
+        <StudyMarkdown content={content} toneClassName={textTone} />
+    );
 }
 
 export function MessageBubble({ role, content, createdAt, type, metadata, onRegenerate, onRate }: MessageBubbleProps) {
@@ -135,13 +146,16 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
     };
 
     const handleRegenerate = () => {
-        onRegenerate?.();
+        void Promise.resolve(onRegenerate?.()).catch((error) => {
+            console.error("Regenerate action failed:", error);
+        });
     };
 
     const handleCopy = async () => {
-        if (!content) return;
+        const chainingContent = getChainingContent().trim();
+        if (!chainingContent) return;
         try {
-            await navigator.clipboard.writeText(content);
+            await navigator.clipboard.writeText(chainingContent);
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
         } catch (err) {
@@ -150,7 +164,8 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
     };
 
     const handleSpeak = () => {
-        if (!content || typeof window === 'undefined') return;
+        const chainingContent = getChainingContent().trim();
+        if (!chainingContent || typeof window === 'undefined') return;
 
         // Stop if already speaking
         if (isSpeaking) {
@@ -159,7 +174,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
             return;
         }
 
-        const utterance = new SpeechSynthesisUtterance(content);
+        const utterance = new SpeechSynthesisUtterance(chainingContent);
         utterance.rate = 1;
         utterance.pitch = 1;
 
@@ -282,9 +297,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
                             </div>
                         )}
                         {displayContent && (
-                            <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">
-                                {displayContent}
-                            </p>
+                            <StudyMarkdown content={displayContent} className="text-sm leading-relaxed text-foreground [&_p]:my-0" />
                         )}
                     </div>
                 </div>
@@ -309,16 +322,7 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
             {/* AI Content - Plain text, no bubble */}
             <div className="pl-9">
                 {displayContent && (
-                    <p
-                        className={cn(
-                            "text-[15px] leading-relaxed whitespace-pre-wrap",
-                            isLoadingPlaceholder
-                                ? "text-foreground/70 italic animate-pulse"
-                                : "text-foreground/90"
-                        )}
-                    >
-                        {displayContent}
-                    </p>
+                    renderTextBlocks(displayContent, isLoadingPlaceholder)
                 )}
 
                 {/* Widget Cards */}
@@ -395,16 +399,23 @@ export function MessageBubble({ role, content, createdAt, type, metadata, onRege
                         {/* Regenerate Button */}
                         <button
                             onClick={handleRegenerate}
-                            disabled={isLimitExceeded}
+                            disabled={isLimitExceeded || !onRegenerate}
                             className={cn(
-                                "p-2 rounded-lg transition-all",
-                                isLimitExceeded
+                                "inline-flex items-center gap-1.5 rounded-lg transition-all px-2.5 py-2 text-xs font-medium",
+                                isLimitExceeded || !onRegenerate
                                     ? "text-muted-foreground/30 cursor-not-allowed"
                                     : "text-muted-foreground hover:text-foreground hover:bg-white/5"
                             )}
-                            title={isLimitExceeded ? "Chat limit reached" : "Regenerate response"}
+                            title={
+                                isLimitExceeded
+                                    ? "Chat limit reached"
+                                    : onRegenerate
+                                        ? "Regenerate response"
+                                        : "Only the latest response can be regenerated"
+                            }
                         >
-                            <RefreshCw className={cn("w-4 h-4", isLimitExceeded && "opacity-50")} />
+                            <RefreshCw className={cn("w-4 h-4", (isLimitExceeded || !onRegenerate) && "opacity-50")} />
+                            <span>Regenerate latest</span>
                         </button>
 
                         {/* Copy Button */}

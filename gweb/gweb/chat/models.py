@@ -7,7 +7,12 @@ class Chat(models.Model):
     title = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     is_deleted = models.BooleanField(default=False)
-    updated_at = models.DateTimeField(auto_now=True)  # 👈 add this line
+    updated_at = models.DateTimeField(auto_now=True)  # 👈 
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "is_deleted", "-updated_at"]),
+        ]
 
     def __str__(self):
         return f"{self.title} ({self.user.username})"
@@ -29,6 +34,9 @@ class ChatCollaborator(models.Model):
 
     class Meta:
         unique_together = ('chat', 'collaborator')
+        indexes = [
+            models.Index(fields=["collaborator", "is_approved", "chat"]),
+        ]
 
     def __str__(self):
         return f"{self.collaborator.username} on {self.chat.title} ({self.access_level})"
@@ -47,6 +55,11 @@ class ChatHistory(models.Model):
     prompt_metadata = models.JSONField(default=dict, blank=True)
     response_type = models.CharField(max_length=20, default='text')
     response_metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["chat", "created_at"]),
+        ]
 
     def __str__(self):
         return f"ChatMessage {self.id} - {self.user.username}"

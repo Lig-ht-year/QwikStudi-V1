@@ -48,6 +48,8 @@ interface AISettings {
     responseStyle: ResponseStyle;
     saveHistory: boolean;
     quickActionsEnabled: boolean;
+    studyMethods: ('feynman' | 'active_recall' | 'spaced_repetition' | 'socratic' | 'interleaving' | 'exam_drill')[];
+    studyCustomPrompt: string;
 }
 
 interface PrivacySettings {

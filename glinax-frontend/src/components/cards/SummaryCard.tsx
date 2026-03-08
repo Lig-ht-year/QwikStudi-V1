@@ -11,6 +11,7 @@ import {
     RotateCcw,
     Check
 } from "lucide-react";
+import { StudyMarkdown } from "../common/StudyMarkdown";
 
 interface SummaryCardProps {
     title: string;
@@ -131,9 +132,7 @@ export function SummaryCard({ title, summary, takeaways, keyTerms = [], onRetry 
                         <div className="w-1 h-3 bg-primary rounded-full" />
                         The Gist
                     </h4>
-                    <p className="text-sm leading-relaxed text-foreground/80 font-medium">
-                        {visibleSummary}
-                    </p>
+                    <StudyMarkdown content={visibleSummary} className="text-sm leading-relaxed text-foreground/80 font-medium [&_p]:my-0" />
                     {isLongSummary && (
                         <button
                             onClick={() => setIsExpanded((v) => !v)}
@@ -156,7 +155,9 @@ export function SummaryCard({ title, summary, takeaways, keyTerms = [], onRetry 
                                 <div className="w-5 h-5 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0 mt-0.5">
                                     <span className="text-[10px] font-bold">{i + 1}</span>
                                 </div>
-                                <span className="font-medium">{point}</span>
+                                <div className="font-medium text-sm flex-1">
+                                    <StudyMarkdown content={point} className="[&_p]:my-0" />
+                                </div>
                             </li>
                         ))}
                     </ul>
@@ -174,7 +175,9 @@ export function SummaryCard({ title, summary, takeaways, keyTerms = [], onRetry 
                             {visibleKeyTerms.map((item, i) => (
                                 <li key={`${item.term}-${i}`} className="text-sm">
                                     <span className="font-semibold">{item.term}:</span>{" "}
-                                    <span className="text-foreground/80">{item.definition}</span>
+                                    <div className="text-foreground/80 inline-block align-top">
+                                        <StudyMarkdown content={item.definition} className="[&_p]:my-0" />
+                                    </div>
                                 </li>
                             ))}
                         </ul>

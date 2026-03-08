@@ -1,3 +1,5 @@
+import api from "@/lib/api";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 /**
@@ -12,27 +14,13 @@ export type BillingPlan = 'monthly' | 'annual';
  * @returns The authorization URL to redirect the user to
  */
 export async function initiatePayment(plan: BillingPlan = 'monthly'): Promise<{ authorization_url: string; reference: string }> {
-    const access = localStorage.getItem('access');
+    const access = localStorage.getItem('access') || localStorage.getItem('refresh');
     
     if (!access) {
         throw new Error('You must be logged in to upgrade');
     }
 
-    const response = await fetch(`${API_URL}/payment/initiate/`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${access}`,
-        },
-        body: JSON.stringify({ plan }),
-    });
-
-    if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to initiate payment');
-    }
-
-    const data = await response.json();
+    const { data } = await api.post('/payment/initiate/', { plan });
     return {
         authorization_url: data.authorization_url,
         reference: data.reference,
@@ -92,23 +80,14 @@ export async function verifyPayment(reference: string): Promise<{ success: boole
 }
 
 export async function getPaymentStatus(reference?: string): Promise<{ status: string; is_premium: boolean; premium_expiry: string | null }> {
-    const access = localStorage.getItem('access');
+    const access = localStorage.getItem('access') || localStorage.getItem('refresh');
     if (!access) {
         throw new Error('You must be logged in to check payment status');
     }
-    const url = reference ? `${API_URL}/payment/status/?reference=${reference}` : `${API_URL}/payment/status/`;
-    const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${access}`,
-        },
+    const { data } = await api.get('/payment/status/', {
+        params: reference ? { reference } : undefined,
     });
-    if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to check payment status');
-    }
-    return await response.json();
+    return data;
 }
 
 /**
@@ -116,26 +95,14 @@ export async function getPaymentStatus(reference?: string): Promise<{ status: st
  * @returns Whether the user has premium status
  */
 export async function checkPremiumStatus(): Promise<boolean> {
-    const access = localStorage.getItem('access');
+    const access = localStorage.getItem('access') || localStorage.getItem('refresh');
     
     if (!access) {
         return false;
     }
 
     try {
-        const response = await fetch(`${API_URL}/payment/status/`, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${access}`,
-            },
-        });
-
-        if (!response.ok) {
-            return false;
-        }
-
-        const data = await response.json();
+        const { data } = await api.get('/payment/status/');
         return !!data.is_premium;
     } catch {
         return false;

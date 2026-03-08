@@ -47,6 +47,9 @@ const difficulties = [
     { id: "hard", name: "Hard", color: "text-red-500 bg-red-500/10 border-red-500/30" },
 ];
 
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const VALID_EXTENSIONS = ['txt', 'pdf', 'doc', 'docx', 'md', 'ppt', 'pptx'];
+
 export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }: QuizConfigModalProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [questionType, setQuestionType] = useState("mcq");
@@ -69,8 +72,6 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
         }
     }, [isOpen, clearSelectedContent]);
 
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-
     if (!isOpen) return null;
 
     const validateFile = (file: File): boolean => {
@@ -82,8 +83,7 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
 
         // Check file extension
         const ext = file.name.toLowerCase().split('.').pop();
-        const validExtensions = ['txt', 'pdf', 'doc', 'docx', 'md'];
-        if (!ext || !validExtensions.includes(ext)) {
+        if (!ext || !VALID_EXTENSIONS.includes(ext)) {
             showToast('Invalid file type. Please upload a supported document.', 'error');
             return false;
         }
@@ -224,7 +224,7 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                             <input
                                 id="quiz-file-input"
                                 type="file"
-                                accept=".txt,.pdf,.doc,.docx,.md"
+                                accept=".txt,.pdf,.doc,.docx,.md,.ppt,.pptx"
                                 className="hidden"
                                 onChange={(e) => {
                                     const file = e.target.files?.[0];
@@ -247,6 +247,9 @@ export function QuizConfigModal({ isOpen, onClose, onGenerate, initialContent }:
                                 <div className="text-center">
                                     <p className="text-xs font-medium text-muted-foreground">
                                         {isDragging ? "Drop file here" : "Drop file or click to browse"}
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground/70 mt-0.5">
+                                        Supports up to 50MB
                                     </p>
                                 </div>
                             )}

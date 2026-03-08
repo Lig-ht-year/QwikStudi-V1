@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { nanoid } from 'nanoid';
 import { formatDisplayName } from '@/lib/utils';
+import { applyMessagesToSession, getMessagesForSession } from '@/lib/chatSessionState';
 
 /**
  * Data Store - Handles persistent user data
@@ -11,6 +12,7 @@ import { formatDisplayName } from '@/lib/utils';
 export type PlanType = 'free' | 'pro';
 export type ResponseStyle = 'concise' | 'balanced' | 'detailed';
 export type Language = 'English' | 'French' | 'Twi';
+export type StudyMethod = 'feynman' | 'active_recall' | 'spaced_repetition' | 'socratic' | 'interleaving' | 'exam_drill';
 
 interface Message {
     id: string;
@@ -26,12 +28,16 @@ interface ChatSession {
     title: string;
     lastMessageAt: Date;
     chatId: number | null;
+    studyMethods: StudyMethod[];
+    studyCustomPrompt: string;
 }
 
 interface AISettings {
     responseStyle: ResponseStyle;
     saveHistory: boolean;
     quickActionsEnabled: boolean;
+    studyMethods: StudyMethod[];
+    studyCustomPrompt: string;
 }
 
 interface PrivacySettings {
@@ -57,8 +63,16 @@ interface DataState {
 
     // Messages
     messages: Message[];
+    setMessages: (messages: Message[]) => void;
+    setMessagesForSession: (sessionId: string, messages: Message[]) => void;
     addMessage: (message: Message) => void;
+    addMessageToSession: (sessionId: string, message: Message) => void;
+    appendMessageContent: (id: string, delta: string) => void;
+    appendMessageContentInSession: (sessionId: string, id: string, delta: string) => void;
+    updateMessage: (id: string, updates: Partial<Message>) => void;
+    updateMessageInSession: (sessionId: string, id: string, updates: Partial<Message>) => void;
     removeMessage: (id: string) => void;
+    removeMessageFromSession: (sessionId: string, id: string) => void;
     clearMessages: () => void;
 
     // Selected content for modals (from message bubble actions)
@@ -120,6 +134,8 @@ const DEFAULT_AI_SETTINGS: AISettings = {
     responseStyle: 'balanced',
     saveHistory: true,
     quickActionsEnabled: true,
+    studyMethods: [],
+    studyCustomPrompt: '',
 };
 
 const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
@@ -135,7 +151,8 @@ const normalizeUsername = (value: string | null | undefined): string | null => {
 
 export const useDataStore = create<DataState>()(
     persist(
-        (set, get) => ({
+        (set, get) => {
+            return ({
             hasHydrated: false,
             setHasHydrated: (hasHydrated) => set({ hasHydrated }),
 
@@ -231,13 +248,107 @@ export const useDataStore = create<DataState>()(
 
             // Messages
             messages: [],
-            addMessage: (message) => set((state) => ({
-                messages: [...state.messages, message]
+            setMessages: (messages) => set((state) => ({
+                messages,
+                sessionMessages: state.activeSessionId
+                    ? {
+                        ...state.sessionMessages,
+                        [state.activeSessionId]: messages,
+                    }
+                    : state.sessionMessages,
             })),
-            removeMessage: (id: string) => set((state) => ({
-                messages: state.messages.filter(m => m.id !== id)
+            setMessagesForSession: (sessionId, messages) => set((state) => applyMessagesToSession(state, sessionId, messages)),
+            addMessage: (message) => set((state) => {
+                const messages = [...state.messages, message];
+                return {
+                    messages,
+                    sessionMessages: state.activeSessionId
+                        ? {
+                            ...state.sessionMessages,
+                            [state.activeSessionId]: messages,
+                        }
+                        : state.sessionMessages,
+                };
+            }),
+            addMessageToSession: (sessionId, message) => set((state) => {
+                const currentMessages = getMessagesForSession(state, sessionId);
+                return applyMessagesToSession(state, sessionId, [...currentMessages, message]);
+            }),
+            appendMessageContent: (id, delta) => set((state) => {
+                const messages = state.messages.map((message) =>
+                    message.id === id
+                        ? { ...message, content: `${message.content || ""}${delta}` }
+                        : message
+                );
+                return {
+                    messages,
+                    sessionMessages: state.activeSessionId
+                        ? {
+                            ...state.sessionMessages,
+                            [state.activeSessionId]: messages,
+                        }
+                        : state.sessionMessages,
+                };
+            }),
+            appendMessageContentInSession: (sessionId, id, delta) => set((state) => {
+                const currentMessages = getMessagesForSession(state, sessionId);
+                const messages = currentMessages.map((message) =>
+                    message.id === id
+                        ? { ...message, content: `${message.content || ""}${delta}` }
+                        : message
+                );
+                return applyMessagesToSession(state, sessionId, messages);
+            }),
+            updateMessage: (id, updates) => set((state) => {
+                const messages = state.messages.map((message) =>
+                    message.id === id ? { ...message, ...updates } : message
+                );
+                return {
+                    messages,
+                    sessionMessages: state.activeSessionId
+                        ? {
+                            ...state.sessionMessages,
+                            [state.activeSessionId]: messages,
+                        }
+                        : state.sessionMessages,
+                };
+            }),
+            updateMessageInSession: (sessionId, id, updates) => set((state) => {
+                const currentMessages = getMessagesForSession(state, sessionId);
+                const messages = currentMessages.map((message) =>
+                    message.id === id ? { ...message, ...updates } : message
+                );
+                return applyMessagesToSession(state, sessionId, messages);
+            }),
+            removeMessage: (id: string) => set((state) => {
+                const messages = state.messages.filter(m => m.id !== id);
+                return {
+                    messages,
+                    sessionMessages: state.activeSessionId
+                        ? {
+                            ...state.sessionMessages,
+                            [state.activeSessionId]: messages,
+                        }
+                        : state.sessionMessages,
+                };
+            }),
+            removeMessageFromSession: (sessionId: string, id: string) => set((state) => {
+                const currentMessages = getMessagesForSession(state, sessionId);
+                return applyMessagesToSession(
+                    state,
+                    sessionId,
+                    currentMessages.filter((message) => message.id !== id)
+                );
+            }),
+            clearMessages: () => set((state) => ({
+                messages: [],
+                sessionMessages: state.activeSessionId
+                    ? {
+                        ...state.sessionMessages,
+                        [state.activeSessionId]: [],
+                    }
+                    : state.sessionMessages,
             })),
-            clearMessages: () => set({ messages: [] }),
 
             // Selected content for modals (from message bubble actions)
             selectedContent: { type: null, content: '' },
@@ -256,7 +367,16 @@ export const useDataStore = create<DataState>()(
                 chatId: null,
                 messages: [],
             }),
-            setActiveSessionId: (activeSessionId) => set({ activeSessionId }),
+            setActiveSessionId: (activeSessionId) => set((state) => {
+                const nextSession = activeSessionId
+                    ? state.sessions.find((session) => session.id === activeSessionId)
+                    : null;
+                return {
+                    activeSessionId,
+                    chatId: nextSession?.chatId ?? null,
+                    messages: activeSessionId ? (state.sessionMessages[activeSessionId] ?? []) : [],
+                };
+            }),
             createSession: (title, options) => set((state) => {
                 const { chatId = null, resetMessages = true, setActive = true } = options || {};
                 const newSession = {
@@ -264,6 +384,8 @@ export const useDataStore = create<DataState>()(
                     title,
                     lastMessageAt: new Date(),
                     chatId,
+                    studyMethods: [...(state.aiSettings.studyMethods || [])],
+                    studyCustomPrompt: state.aiSettings.studyCustomPrompt || "",
                 };
                 return {
                     sessions: [newSession, ...state.sessions],
@@ -306,6 +428,8 @@ export const useDataStore = create<DataState>()(
                     title: chat.title,
                     lastMessageAt: new Date(), // Could be improved to get actual last message time
                     chatId: chat.id,
+                    studyMethods: [],
+                    studyCustomPrompt: '',
                 }));
                 const nextActiveId = loadedSessions[0]?.id || null;
                 const nextChatId = loadedSessions[0]?.chatId ?? null;
@@ -391,7 +515,8 @@ export const useDataStore = create<DataState>()(
                     exportedAt: new Date().toISOString(),
                 }, null, 2);
             },
-        }),
+        });
+    },
         {
             name: 'qwikstudi-data',
             onRehydrateStorage: () => (state) => {

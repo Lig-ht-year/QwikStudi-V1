@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import api from "@/lib/api";
+import { StudyMarkdown } from "../common/StudyMarkdown";
 
 // Question types
 export type QuestionType = 'mcq' | 'tf' | 'fill' | 'essay';
@@ -425,9 +426,9 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
 
             <div className="p-6 space-y-6">
                 {/* Question */}
-                <h4 className="text-lg font-bold leading-tight">
-                    {currentQuestion.question}
-                </h4>
+                <div className="text-lg font-bold leading-tight">
+                    <StudyMarkdown content={currentQuestion.question} className="[&_p]:my-0" />
+                </div>
 
                 {/* Options or Input based on question type */}
                 {(() => {
@@ -485,9 +486,12 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                                 <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mb-1">
                                                     {isFill ? "Answer" : "Guidance"}
                                                 </p>
-                                                <p className="text-sm text-muted-foreground">
-                                                    {graded?.guidance || currentQuestion.guidance || evaluated.guidance}
-                                                </p>
+                                                <div className="text-sm text-muted-foreground">
+                                                    <StudyMarkdown
+                                                        content={graded?.guidance || currentQuestion.guidance || evaluated.guidance}
+                                                        className="[&_p]:my-0"
+                                                    />
+                                                </div>
                                                 {graded?.feedback && (
                                                     <p className="text-xs text-muted-foreground mt-2">
                                                         Feedback: {graded.feedback}
@@ -499,9 +503,12 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                                     </p>
                                                 )}
                                                 {(currentQuestion.correctText || currentQuestion.explanation) && (
-                                                    <p className="text-sm text-muted-foreground mt-2">
-                                                        {currentQuestion.correctText || currentQuestion.explanation}
-                                                    </p>
+                                                    <div className="text-sm text-muted-foreground mt-2">
+                                                        <StudyMarkdown
+                                                            content={currentQuestion.correctText || currentQuestion.explanation || ""}
+                                                            className="[&_p]:my-0"
+                                                        />
+                                                    </div>
                                                 )}
                                                 <p className={cn(
                                                     "text-xs font-semibold mt-2",
@@ -554,7 +561,9 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                             showResult && !isCorrect && !isSelected && "border-border opacity-50 bg-secondary/10"
                                         )}
                                     >
-                                        <span className="font-medium">{option}</span>
+                                        <div className="font-medium">
+                                            <StudyMarkdown content={option} className="[&_p]:my-0 [&_p]:inline" />
+                                        </div>
                                         {showResult && isCorrect && <CheckCircle2 className="w-5 h-5 shrink-0" />}
                                         {showResult && isSelected && !isCorrect && <XCircle className="w-5 h-5 shrink-0" />}
                                     </button>
@@ -574,10 +583,14 @@ export function QuizWidgetCard({ title, questions, difficulty = "medium", quizTy
                                     Concept: {getConceptLabel(currentQuestion)}
                                 </p>
                                 {currentQuestion.guidance && (
-                                    <p className="text-sm text-muted-foreground mb-2">{currentQuestion.guidance}</p>
+                                    <div className="text-sm text-muted-foreground mb-2">
+                                        <StudyMarkdown content={currentQuestion.guidance} className="[&_p]:my-0" />
+                                    </div>
                                 )}
                                 <p className="text-xs font-bold text-blue-600 dark:text-blue-400 mb-1">Explanation</p>
-                                <p className="text-sm text-muted-foreground">{currentQuestion.explanation}</p>
+                                <div className="text-sm text-muted-foreground">
+                                    <StudyMarkdown content={currentQuestion.explanation} className="[&_p]:my-0" />
+                                </div>
                             </div>
                         </div>
                     </div>

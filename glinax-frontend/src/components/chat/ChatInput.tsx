@@ -14,7 +14,8 @@ import {
     FileText,
     Upload,
     Loader2,
-    Wrench
+    Wrench,
+    Check
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
@@ -22,12 +23,65 @@ import { useDataStore } from "@/stores/dataStore";
 import { translations } from "@/lib/translations";
 import { useToast } from "@/components/Toast";
 import Cookies from "js-cookie";
-import api from "@/lib/api";
-import { commitChat } from "@/lib/CommitChat";
+import { streamChat } from "@/lib/chatStream";
+import { STUDY_METHOD_OPTIONS } from "@/lib/studyMethods";
+import type { StudyMethod } from "@/stores/dataStore";
 
 // Maximum file size: 10MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_CHAT_FILE_EXTENSIONS = ['pdf', 'txt', 'doc', 'docx', 'md', 'ppt', 'pptx'];
+const DEFAULT_CHAT_TITLES = new Set(["new chat", "new study session", "untitled chat"]);
+
+function isDefaultChatTitle(title: string | null | undefined): boolean {
+    return DEFAULT_CHAT_TITLES.has(String(title || "").trim().toLowerCase());
+}
+
+function buildDraftChatTitle(userMessage: string, fileSummary: string): string {
+    const source = (userMessage || fileSummary || "").replace(/\s+/g, " ").trim();
+    if (!source) return "New Chat";
+    const words = source.split(" ").filter(Boolean).slice(0, 7);
+    const base = words.join(" ").replace(/[.,:;!?]+$/g, "");
+    if (!base) return "New Chat";
+    const titled = base.charAt(0).toUpperCase() + base.slice(1);
+    return titled.length > 70 ? `${titled.slice(0, 67).trimEnd()}...` : titled;
+}
+
+type SpeechRecognitionResultLike = {
+    isFinal: boolean;
+    0: {
+        transcript: string;
+    };
+};
+
+type SpeechRecognitionEventLike = {
+    resultIndex: number;
+    results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionErrorEventLike = {
+    error: string;
+};
+
+type SpeechRecognitionInstance = {
+    continuous: boolean;
+    interimResults: boolean;
+    lang: string;
+    onstart: (() => void) | null;
+    onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+    onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+    onend: (() => void) | null;
+    start: () => void;
+    stop: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
+
+declare global {
+    interface Window {
+        SpeechRecognition?: SpeechRecognitionConstructor;
+        webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    }
+}
 
 export function ChatInput() {
     const router = useRouter();
@@ -39,18 +93,27 @@ export function ChatInput() {
     const [isSending, setIsSending] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const recognitionRef = useRef<any>(null);
+    const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+    const composerRef = useRef<HTMLDivElement>(null);
+    const featuresPanelRef = useRef<HTMLDivElement>(null);
+    const attachMenuRef = useRef<HTMLDivElement>(null);
+    const desktopToolsButtonRef = useRef<HTMLButtonElement>(null);
+    const mobileAttachButtonRef = useRef<HTMLButtonElement>(null);
     const { showToast } = useToast();
     const isLoading = useUIStore((state) => state.isLoading);
 
     // Use atomic stores directly for proper reactivity
-    const addMessage = useDataStore((state) => state.addMessage);
+    const addMessageToSession = useDataStore((state) => state.addMessageToSession);
+    const appendMessageContentInSession = useDataStore((state) => state.appendMessageContentInSession);
+    const updateMessageInSession = useDataStore((state) => state.updateMessageInSession);
+    const removeMessageFromSession = useDataStore((state) => state.removeMessageFromSession);
     const aiSettings = useDataStore((state) => state.aiSettings);
     const chatId = useDataStore((state) => state.chatId);
     const setChatId = useDataStore((state) => state.setChatId);
     const createSession = useDataStore((state) => state.createSession);
     const updateSession = useDataStore((state) => state.updateSession);
-    const updateSessionByChatId = useDataStore((state) => state.updateSessionByChatId);
+    const activeSessionId = useDataStore((state) => state.activeSessionId);
+    const sessions = useDataStore((state) => state.sessions);
     const setActiveModal = useUIStore((state) => state.setActiveModal);
     const explainPrompt = useUIStore((state) => state.explainPrompt);
     const clearExplainPrompt = useUIStore((state) => state.clearExplainPrompt);
@@ -69,6 +132,44 @@ export function ChatInput() {
     const hasInputContent = input.trim().length > 0 || files.length > 0;
     const isBusy = isSending || isLoading;
     const isComposerBlocked = isBusy || isLimitExceeded;
+    const activeSession = activeSessionId
+        ? sessions.find((session) => session.id === activeSessionId)
+        : null;
+    const selectedStudyMethods = activeSession?.studyMethods ?? aiSettings.studyMethods ?? [];
+    const studyCustomPrompt = activeSession?.studyCustomPrompt ?? aiSettings.studyCustomPrompt ?? "";
+
+    const syncSessionChatId = (sessionId: string, nextChatId: number | null) => {
+        if (!nextChatId) return;
+        updateSession(sessionId, { chatId: nextChatId });
+        if (useDataStore.getState().activeSessionId === sessionId) {
+            setChatId(nextChatId);
+        }
+    };
+
+    const updateStudyPreferences = (updates: { studyMethods?: StudyMethod[]; studyCustomPrompt?: string }) => {
+        if (activeSessionId) {
+            updateSession(activeSessionId, updates);
+            return;
+        }
+        createSession("New Chat", {
+            resetMessages: false,
+            setActive: true,
+        });
+        const draftSessionId = useDataStore.getState().activeSessionId;
+        if (draftSessionId) {
+            updateSession(draftSessionId, updates);
+            return;
+        }
+        useDataStore.getState().setAISettings(updates);
+    };
+
+    const toggleStudyMethod = (methodId: StudyMethod) => {
+        const current = selectedStudyMethods || [];
+        const next = current.includes(methodId)
+            ? current.filter((item) => item !== methodId)
+            : [...current, methodId];
+        updateStudyPreferences({ studyMethods: next });
+    };
 
     // Initialize guest_id on mount (use UUID format for Django compatibility)
     useEffect(() => {
@@ -111,6 +212,46 @@ export function ChatInput() {
         setFiles([]);
     }, [isLimitExceeded]);
 
+    useEffect(() => {
+        const handlePointerDown = (event: MouseEvent) => {
+            const target = event.target as Node | null;
+            if (!target) return;
+
+            const clickedInsideComposer = composerRef.current?.contains(target);
+            const clickedDesktopToolsButton = desktopToolsButtonRef.current?.contains(target);
+            const clickedMobileAttachButton = mobileAttachButtonRef.current?.contains(target);
+            const clickedFeaturesPanel = featuresPanelRef.current?.contains(target);
+            const clickedAttachMenu = attachMenuRef.current?.contains(target);
+
+            if (
+                clickedInsideComposer ||
+                clickedDesktopToolsButton ||
+                clickedMobileAttachButton ||
+                clickedFeaturesPanel ||
+                clickedAttachMenu
+            ) {
+                return;
+            }
+
+            setShowFeatures(false);
+            setShowAttachMenu(false);
+        };
+
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            setShowFeatures(false);
+            setShowAttachMenu(false);
+        };
+
+        document.addEventListener("mousedown", handlePointerDown);
+        document.addEventListener("keydown", handleEscape);
+
+        return () => {
+            document.removeEventListener("mousedown", handlePointerDown);
+            document.removeEventListener("keydown", handleEscape);
+        };
+    }, []);
+
     const toggleRecording = () => {
         if (isComposerBlocked) return;
         if (isRecording) {
@@ -122,7 +263,7 @@ export function ChatInput() {
             return;
         }
 
-        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SpeechRecognition) {
             alert("Speech recognition is not supported in this browser.");
             return;
@@ -131,13 +272,18 @@ export function ChatInput() {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        const recognitionLanguageMap: Record<string, string> = {
+            English: "en-US",
+            French: "fr-FR",
+            Twi: "ak-GH",
+        };
+        recognition.lang = recognitionLanguageMap[language] || "en-US";
 
         recognition.onstart = () => {
             setIsRecording(true);
         };
 
-        recognition.onresult = (event: any) => {
+        recognition.onresult = (event: SpeechRecognitionEventLike) => {
             let finalTranscript = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
                 const transcript = event.results[i][0].transcript;
@@ -150,7 +296,7 @@ export function ChatInput() {
             }
         };
 
-        recognition.onerror = (event: any) => {
+        recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
             console.error('Speech recognition error', event.error);
             setIsRecording(false);
 
@@ -190,6 +336,8 @@ export function ChatInput() {
 
     useEffect(() => {
         if (!explainPrompt) return;
+        setShowFeatures(false);
+        setShowAttachMenu(false);
         setInput(explainPrompt);
         clearExplainPrompt();
         requestAnimationFrame(() => {
@@ -212,35 +360,28 @@ export function ChatInput() {
         const fileNames = selectedFiles.map((file) => file.name);
         const fileSummary = fileNames.length > 0 ? `Attached file${fileNames.length > 1 ? "s" : ""}: ${fileNames.join(", ")}` : "";
         const displayMessage = userMessage || fileSummary;
+        const provisionalTitle = buildDraftChatTitle(userMessage, fileSummary);
         const hasFiles = selectedFiles.length > 0;
         const guestId = Cookies.get("guest_id");
         const now = new Date();
+        let sessionIdForMessage = activeSessionId;
 
-        // Guest preflight: if limit is exhausted, block immediately without showing typing/loading.
-        if (!isLoggedIn && guestId) {
-            try {
-                const statusRes = await api.get("/chat/guest/status/", {
-                    params: { guest_id: guestId },
-                });
-                if (statusRes.data?.limit_exceeded) {
-                    setIsLimitExceeded(true);
-                    setLimitMessage(
-                        String(
-                            statusRes.data?.message ||
-                            "You've reached your guest chat limit. Please log in to continue."
-                        )
-                    );
-                    showToast("Guest limit reached. Log in to continue.", "info");
-                    return;
-                }
-            } catch {
-                // Non-blocking: if preflight fails, proceed with normal send flow.
-            }
+        if (!sessionIdForMessage) {
+            createSession(provisionalTitle, {
+                resetMessages: false,
+                setActive: true,
+            });
+            sessionIdForMessage = useDataStore.getState().activeSessionId;
+        }
+
+        if (!sessionIdForMessage) {
+            showToast("Couldn't start a chat session. Please try again.", "error");
+            return;
         }
 
         // Add user message immediately
         if (hasFiles) {
-            addMessage({
+            addMessageToSession(sessionIdForMessage, {
                 id: nanoid(),
                 role: 'user',
                 content: userMessage,
@@ -253,7 +394,7 @@ export function ChatInput() {
                 createdAt: now,
             });
         } else {
-            addMessage({
+            addMessageToSession(sessionIdForMessage, {
                 id: nanoid(),
                 role: 'user',
                 content: displayMessage,
@@ -261,8 +402,12 @@ export function ChatInput() {
             });
         }
 
-        const titleSource = userMessage || fileSummary || "New Chat";
-        const trimmedTitle = titleSource.length > 60 ? `${titleSource.slice(0, 60)}...` : titleSource;
+        if (sessionIdForMessage && !activeSession) {
+            updateSession(sessionIdForMessage, {
+                studyMethods: [...selectedStudyMethods],
+                studyCustomPrompt,
+            });
+        }
 
         // Clear composer state immediately after send click.
         setInput("");
@@ -272,100 +417,104 @@ export function ChatInput() {
         // Call GLINAX API
         setIsSending(true);
         setIsLoading(true);
+        const assistantMessageId = nanoid();
+        addMessageToSession(sessionIdForMessage, {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: '',
+            createdAt: new Date(),
+        });
 
         try {
-            const res = hasFiles
-                ? await (() => {
-                    const formData = new FormData();
-                    formData.append("prompt", userMessage);
-                    if (guestId) formData.append("guest_id", guestId);
-                    if (chatId) formData.append("chat_id", String(chatId));
-                    formData.append("response_style", aiSettings.responseStyle);
-                    selectedFiles.forEach((file) => formData.append("files", file));
-                    return api.post("/chat/", formData);
-                })()
-                : await api.post("/chat/", {
+            const streamed = await streamChat(
+                {
                     prompt: userMessage,
                     guest_id: guestId,
-                    chat_id: chatId,  // Pass existing chat_id if available
+                    chat_id: chatId,
                     response_style: aiSettings.responseStyle,
-                });
+                    study_methods: selectedStudyMethods,
+                    study_custom_prompt: studyCustomPrompt,
+                    files: hasFiles ? selectedFiles : undefined,
+                },
+                {
+                    onMeta: (payload) => {
+                        const metaChatId = typeof payload.chat_id === "number" ? payload.chat_id : null;
+                        syncSessionChatId(sessionIdForMessage, metaChatId);
+                        const metaGuestId = typeof payload.guest_id === "string" ? payload.guest_id : "";
+                        if (metaGuestId && metaGuestId !== guestId) {
+                            Cookies.set("guest_id", metaGuestId, {
+                                expires: 7,
+                                secure: process.env.NODE_ENV === 'production',
+                                sameSite: 'Strict'
+                            });
+                        }
+                    },
+                    onDelta: (delta) => {
+                        appendMessageContentInSession(sessionIdForMessage, assistantMessageId, delta);
+                    },
+                    onFinal: (responseText) => {
+                        updateMessageInSession(sessionIdForMessage, assistantMessageId, { content: responseText });
+                    },
+                }
+            );
 
-            if (res.data?.guest_id && res.data.guest_id !== guestId) {
-                Cookies.set("guest_id", res.data.guest_id, {
+            if (streamed?.guest_id && streamed.guest_id !== guestId) {
+                Cookies.set("guest_id", streamed.guest_id, {
                     expires: 7,
                     secure: process.env.NODE_ENV === 'production',
                     sameSite: 'Strict'
                 });
             }
 
-            // Check for limit exceeded response
-            if (res.data.limit_exceeded) {
+            if (streamed.limit_exceeded) {
+                removeMessageFromSession(sessionIdForMessage, assistantMessageId);
                 setIsLimitExceeded(true);
-                setLimitMessage(res.data.message);
+                setLimitMessage(streamed.message || "You've reached your guest chat limit. Please log in to continue.");
                 setIsSending(false);
                 setIsLoading(false);
                 return;
             }
 
-            // Add AI response
-            addMessage({
-                id: nanoid(),
-                role: 'assistant',
-                content: res.data.response,
-                createdAt: new Date(),
-            });
-
-            const responseChatId: number | null = typeof res.data.chat_id === "number" ? res.data.chat_id : null;
-            if (responseChatId) {
-                setChatId(responseChatId);
+            if (typeof streamed.response === "string") {
+                updateMessageInSession(sessionIdForMessage, assistantMessageId, { content: streamed.response });
             }
 
+            const responseChatId: number | null = typeof streamed.chat_id === "number" ? streamed.chat_id : null;
+            syncSessionChatId(sessionIdForMessage, responseChatId);
+
             const latestState = useDataStore.getState();
-            const latestSessionId = latestState.activeSessionId;
+            const latestSessionId = sessionIdForMessage ?? latestState.activeSessionId;
             const latestSession = latestSessionId
                 ? latestState.sessions.find((session) => session.id === latestSessionId)
                 : null;
-            const defaultTitle = latestSession?.title === "New Study Session" || latestSession?.title === "New Chat";
+            const nextChatTitle =
+                typeof streamed.chat_title === "string" && streamed.chat_title.trim().length > 0
+                    ? streamed.chat_title.trim()
+                    : null;
 
             if (latestSessionId) {
+                const fallbackTitle = !nextChatTitle && isDefaultChatTitle(latestSession?.title)
+                    ? provisionalTitle
+                    : null;
                 updateSession(latestSessionId, {
-                    ...(defaultTitle || !latestSession?.title ? { title: trimmedTitle } : {}),
+                    ...(nextChatTitle ? { title: nextChatTitle } : fallbackTitle ? { title: fallbackTitle } : {}),
                     ...(responseChatId && !latestSession?.chatId ? { chatId: responseChatId } : {}),
                     lastMessageAt: new Date(),
                 });
             } else {
-                createSession(trimmedTitle || "New Chat", {
+                createSession(nextChatTitle || provisionalTitle || "New Chat", {
                     chatId: responseChatId,
                     resetMessages: false,
                     setActive: true,
                 });
             }
-
-            // Auto-generate title from normal chat flow as soon as the first exchange exists.
-            const latestAfterReply = useDataStore.getState();
-            const commitChatId = responseChatId ?? latestAfterReply.chatId;
-            if (commitChatId) {
-                commitChat(Number(commitChatId), [])
-                    .then((result) => {
-                        if (result?.title) {
-                            updateSessionByChatId(Number(commitChatId), {
-                                title: result.title,
-                                lastMessageAt: new Date(),
-                            });
-                        }
-                    })
-                    .catch(console.error);
-            }
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Chat API error:", error);
-            const message = error?.response?.data?.error || "Sorry, I couldn't process your request. Please try again.";
-            addMessage({
-                id: nanoid(),
-                role: 'assistant',
-                content: message,
-                createdAt: new Date(),
-            });
+            const axiosLike = error as { response?: { data?: { error?: string } } };
+            const message =
+                axiosLike?.response?.data?.error ||
+                (error instanceof Error ? error.message : "Sorry, I couldn't process your request. Please try again.");
+            updateMessageInSession(sessionIdForMessage, assistantMessageId, { content: message });
             showToast(message, "error");
         } finally {
             setIsSending(false);
@@ -401,6 +550,11 @@ export function ChatInput() {
         ext: getFileExt(file.name),
         content_type: file.type || "",
     });
+
+    const closeComposerMenus = () => {
+        setShowFeatures(false);
+        setShowAttachMenu(false);
+    };
 
     // Drag and drop handlers
     const handleDragEnter = (e: React.DragEvent) => {
@@ -479,22 +633,31 @@ export function ChatInput() {
     const openProtectedModal = (modal: 'quiz' | 'summarize' | 'tts' | 'stt') => {
         if (isLimitExceeded) {
             showToast("Guest limit reached. Log in to continue.", "info");
-            setShowFeatures(false);
+            closeComposerMenus();
             router.push("/login");
             return;
         }
         if (!isLoggedIn) {
             showToast("Please log in or register to use this feature.", "error");
-            setShowFeatures(false);
+            closeComposerMenus();
             router.push("/login");
             return;
         }
         setActiveModal(modal);
-        setShowFeatures(false);
+        closeComposerMenus();
     };
 
     return (
         <div className="w-full pb-4">
+            {(showFeatures || showAttachMenu) && (
+                <button
+                    type="button"
+                    aria-label="Close composer menus"
+                    className="fixed inset-0 z-20 bg-black/20 backdrop-blur-[1px]"
+                    onClick={closeComposerMenus}
+                />
+            )}
+
             {/* Limit Exceeded Banner */}
             {isLimitExceeded && (
                 <div className="mb-3 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/25 animate-in fade-in slide-in-from-top-2 relative">
@@ -544,8 +707,9 @@ export function ChatInput() {
 
             {/* Main Input Container - Gemini Style with Drag & Drop */}
             <div
+                ref={composerRef}
                 className={cn(
-                    "relative bg-card/60 backdrop-blur-xl rounded-3xl shadow-lg transition-all",
+                    "relative z-30 bg-card/60 backdrop-blur-xl rounded-3xl shadow-lg transition-all",
                     isDragging && "ring-2 ring-primary ring-offset-2 ring-offset-background bg-primary/5"
                 )}
                 onDragEnter={handleDragEnter}
@@ -596,11 +760,46 @@ export function ChatInput() {
                     </div>
                 )}
 
+                {(selectedStudyMethods.length > 0 || studyCustomPrompt.trim().length > 0) && (
+                    <div className="px-3 pt-2 pb-1 border-b border-white/5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            {selectedStudyMethods.map((methodId) => {
+                                const method = STUDY_METHOD_OPTIONS.find((option) => option.id === methodId);
+                                if (!method) return null;
+                                return (
+                                    <button
+                                        key={method.id}
+                                        type="button"
+                                        onClick={() => toggleStudyMethod(method.id)}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-primary/15 text-primary border border-primary/20 hover:bg-primary/20 transition-colors"
+                                        title={`Remove ${method.shortLabel}`}
+                                    >
+                                        {method.shortLabel}
+                                        <X className="w-3 h-3" />
+                                    </button>
+                                );
+                            })}
+                            {studyCustomPrompt.trim().length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => updateStudyPreferences({ studyCustomPrompt: "" })}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-white/5 text-muted-foreground border border-white/10 hover:bg-white/10 transition-colors"
+                                    title="Clear custom instruction"
+                                >
+                                    Custom instruction
+                                    <X className="w-3 h-3" />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                )}
+
                 {/* Input Row */}
                 <div className="flex items-center gap-1 p-2">
                     {/* Mobile: Plus Button opens attachment menu */}
                     <div className="relative md:hidden">
                         <button
+                            ref={mobileAttachButtonRef}
                             onClick={() => setShowAttachMenu(!showAttachMenu)}
                             disabled={isComposerBlocked}
                             aria-label="Attach files"
@@ -619,7 +818,10 @@ export function ChatInput() {
 
                         {/* Mobile Attachment Menu - ChatGPT Style */}
                         {showAttachMenu && (
-                            <div className="absolute bottom-full left-0 mb-2 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 min-w-[180px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
+                            <div
+                                ref={attachMenuRef}
+                                className="absolute bottom-full left-0 mb-2 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 min-w-[180px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30"
+                            >
                                 {/* Document */}
                                 <button
                                     onClick={() => { fileInputRef.current?.click(); setShowAttachMenu(false); }}
@@ -662,6 +864,7 @@ export function ChatInput() {
 
                     {/* Tools Button - Desktop only */}
                     <button
+                        ref={desktopToolsButtonRef}
                         onClick={() => setShowFeatures(!showFeatures)}
                         disabled={isComposerBlocked}
                         className={cn(
@@ -697,7 +900,7 @@ export function ChatInput() {
                                     : (t.messagePlaceholder || "Message QwikStudi...")
                         }
                         disabled={isComposerBlocked}
-                        className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-sm max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
+                        className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none resize-none py-2.5 px-2 text-base md:text-base max-h-[120px] custom-scrollbar placeholder:text-muted-foreground/50 leading-relaxed caret-primary"
                     />
 
                     {/* Right Side Actions */}
@@ -746,7 +949,10 @@ export function ChatInput() {
 
                 {/* Features Popup Menu - Clean Professional Design */}
                 {showFeatures && (
-                    <div className="absolute bottom-full left-2 right-2 md:left-4 md:right-auto mb-3 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 md:p-2 md:min-w-[240px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30">
+                    <div
+                        ref={featuresPanelRef}
+                        className="absolute bottom-full left-2 right-2 md:left-4 md:right-auto mb-3 bg-card/98 backdrop-blur-xl border border-white/10 rounded-xl shadow-xl shadow-black/10 p-1.5 md:p-2 md:min-w-[240px] animate-in slide-in-from-bottom-3 fade-in duration-200 z-30"
+                    >
                         {/* Quiz Tool */}
                         <button
                             onClick={() => openProtectedModal('quiz')}
@@ -802,6 +1008,41 @@ export function ChatInput() {
                             </div>
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/10 text-sky-500 font-medium">STT</span>
                         </button>
+
+                        <div className="my-2 h-px bg-white/10" />
+
+                        <div className="px-2.5 py-1">
+                            <p className="text-[11px] uppercase tracking-wide text-muted-foreground/80 mb-2">Study Method</p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {STUDY_METHOD_OPTIONS.map((method) => {
+                                    const active = selectedStudyMethods.includes(method.id);
+                                    return (
+                                        <button
+                                            key={method.id}
+                                            type="button"
+                                            onClick={() => toggleStudyMethod(method.id)}
+                                            title={method.description}
+                                            className={cn(
+                                                "inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] border transition-colors",
+                                                active
+                                                    ? "border-primary/60 bg-primary/15 text-primary"
+                                                    : "border-white/10 text-muted-foreground hover:text-foreground hover:border-white/20"
+                                            )}
+                                        >
+                                            {active && <Check className="w-3 h-3" />}
+                                            {method.shortLabel}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            <textarea
+                                value={studyCustomPrompt}
+                                onChange={(e) => updateStudyPreferences({ studyCustomPrompt: e.target.value.slice(0, 240) })}
+                                placeholder="Optional custom study instruction..."
+                                className="mt-2 w-full rounded-lg border border-white/10 bg-background/70 px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/60 resize-none focus:outline-none focus:ring-1 focus:ring-primary/40"
+                                rows={2}
+                            />
+                        </div>
                     </div>
                 )}
             </div>

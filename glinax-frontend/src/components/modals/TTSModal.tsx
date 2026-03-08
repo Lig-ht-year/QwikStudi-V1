@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AsyncFeatureStatus } from "@/components/AsyncFeatureStatus";
+import { useDataStore } from "@/stores/dataStore";
 
 interface TTSModalProps {
     isOpen: boolean;
@@ -35,7 +36,10 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [submitError, setSubmitError] = useState("");
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
+    const plan = useDataStore((state) => state.plan);
     const MAX_FILE_SIZE = 10 * 1024 * 1024;
+    const MAX_TEXT_LENGTH = plan === "pro" ? 5000 : 2000;
 
     if (!isOpen) return null;
 
@@ -50,6 +54,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
         setText("");
         setUploadedFile(null);
         setSelectedVoice("nova");
+        if (fileInputRef.current) fileInputRef.current.value = "";
         onClose();
     };
 
@@ -125,6 +130,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                                 setInputMode("text");
                                 setUploadedFile(null);
                                 setSubmitError("");
+                                if (fileInputRef.current) fileInputRef.current.value = "";
                             }}
                             className={cn(
                                 "flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-medium transition-all",
@@ -154,7 +160,8 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                     {inputMode === "text" ? (
                         <textarea
                             value={text}
-                            onChange={(e) => setText(e.target.value)}
+                            onChange={(e) => setText(e.target.value.slice(0, MAX_TEXT_LENGTH))}
+                            maxLength={MAX_TEXT_LENGTH}
                             placeholder="Enter text to convert..."
                             className="w-full h-32 p-3 bg-muted/20 border border-border/50 rounded-xl resize-none focus:outline-none focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-muted-foreground/50"
                         />
@@ -166,9 +173,10 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                                 "h-32 border border-dashed border-border/50 rounded-xl flex flex-col items-center justify-center gap-2 cursor-pointer transition-all hover:bg-muted/20 hover:border-primary/30",
                                 uploadedFile && "border-primary/50 bg-primary/5"
                             )}
-                            onClick={() => document.getElementById("tts-file-input")?.click()}
+                            onClick={() => fileInputRef.current?.click()}
                         >
                             <input
+                                ref={fileInputRef}
                                 id="tts-file-input"
                                 type="file"
                                 accept=".txt,.pdf,.doc,.docx,.md"
@@ -178,6 +186,7 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                                     if (file && validateFile(file)) {
                                         setUploadedFile(file);
                                     }
+                                    e.currentTarget.value = "";
                                 }}
                             />
                             <Upload className={cn("w-6 h-6", uploadedFile ? "text-primary" : "text-muted-foreground")} />
@@ -230,7 +239,9 @@ export function TTSModal({ isOpen, onClose, onGenerate }: TTSModalProps) {
                     <div className="flex items-center justify-between">
                         <div>
                             <div className="text-[10px] text-muted-foreground font-medium pl-1">
-                                {activeText.length > 0 ? `${activeText.split(/\s+/).filter(Boolean).length} words` : "Ready to generate"}
+                                {activeText.length > 0
+                                    ? `${activeText.split(/\s+/).filter(Boolean).length} words • ${activeText.length}/${MAX_TEXT_LENGTH} chars`
+                                    : `Ready to generate • Max ${MAX_TEXT_LENGTH} chars (${plan === "pro" ? "Pro" : "Free"})`}
                             </div>
                             {submitError && <p className="text-xs text-red-400 mt-1">{submitError}</p>}
                         </div>

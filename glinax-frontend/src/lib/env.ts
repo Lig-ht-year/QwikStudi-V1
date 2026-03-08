@@ -77,7 +77,10 @@ if (typeof window !== 'undefined' || process.env.NODE_ENV === 'production') {
         validateEnv();
     } catch (error) {
         if (process.env.NODE_ENV === 'production') {
-            console.error('Environment validation failed:', error);
+            throw error instanceof Error
+                ? error
+                : new Error('Environment validation failed');
         }
+        console.warn('Environment validation warning:', error);
     }
 }
